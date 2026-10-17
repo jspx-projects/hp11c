@@ -1,8 +1,15 @@
-HP-11C CONSOLIDATED FUNCTIONAL REIMPLEMENTATION SPECIFICATION
-Revision: 2026-08-03
-Consolidated from: Specification.txt, spec_dis.txt, and cross-check against the HP-11C Owner’s Handbook and Problem Solving Guide
-Purpose: Normative functional specification for an LLM or developer to reimplement and/or audit an HP-11C emulator.
-Scope: User-visible functional behavior. Cycle-exact hardware timing is optional unless explicitly stated.
+HP-11C FUNCTIONAL REIMPLEMENTATION SPECIFICATION
+
+Basis:
+- HP-11C Owner's Handbook and Problem-Solving Guide (May 1984).
+- HP-11C Quick Reference.
+- Functional behavior of the HP-11C firmware (ROM), reverse-engineered from
+  the firmware image.
+
+Purpose: Normative functional specification for reimplementing an HP-11C
+calculator.
+Scope: User-visible functional behavior. Cycle-exact hardware timing is
+optional unless explicitly stated.
 ================================================================================
 0. DOCUMENT CONVENTIONS
 ================================================================================
@@ -206,8 +213,8 @@ Implement:
 - Indirect address 20 addresses I for storage/recall/exchange.
 - Indirect address 20 is ALSO valid for storage arithmetic: STO + (i),
   STO - (i), STO * (i) and STO / (i) operate on I, with the usual
-  divide-by-zero (Error 0) and overflow (Error 1) rules.  Verified against the
-  ROM: with I=20 and X=5, the results in I are 25, 15, 100 and 4 respectively.
+  divide-by-zero (Error 0) and overflow (Error 1) rules.  For example, with
+  I=20 and X=5, the results in I are 25, 15, 100 and 4 respectively.
 4.4 Program memory
 ------------------
 Program memory stores keystroke instructions.
@@ -273,7 +280,7 @@ Examples:
 - p-63 r-.9
 - p-19 r-.9
 - p-02 r-.3
-Physical glass layout (verified against the ROM): p-xx occupies d1..d4, d5 and
+Physical glass layout: p-xx occupies d1..d4, d5 and
 d6 are blank, r- occupies d7..d8, the radix mark is in d9 and the register/state
 digit is in d10.  Example (two lines used, R.9 next):  "p-61  r- .9".
 When no more registers can be converted:
@@ -321,8 +328,7 @@ Result:
 - LAST X zero
 - Flags clear
 - Trig mode DEG
-- Display mode HP-compatible default FIX 4 (verified against the ROM: cold
-boot/no Continuous Memory shows 0.0000; 1/3 shows 0.3333)
+- Display mode HP-compatible default FIX 4
 - Radix point convention
 - Random seed zero
 - PC = 000
@@ -831,8 +837,8 @@ etched segment glyphs.
 - r = eg
 - o = cdeg
 The seven-glyph group "Error n" (the word Error, one blank column, then the
-digit) is centered within d1..d10, occupying columns d2..d8.  Verified against
-the ROM: sqrt(-4) displays E at d2, rror at d3..d6, a blank at d7 and 0 at d8.
+digit) is centered within d1..d10, occupying columns d2..d8.  For example,
+sqrt(-4) displays E at d2, rror at d3..d6, a blank at d7 and 0 at d8.
 Pr Error is rendered the same way as:
 P r E r r o r
 centered within columns d2..d9.
@@ -876,26 +882,19 @@ Comma tail, local coords, origin = dot top-left; dot = 7.339 x 7.0:
 M-0.493,8.022 C2.298,8.659 3.931,8.590 6.618,8.267
 C3.864,10.553 -0.151,15.979 -2.153,14.472
 C-3.390,12.508 -1.403,10.273 -0.493,8.022 Z
-Reference parameters, fractions of the locked image size W x H.
+Reference parameters, fractions of the image size W x H.
 
-These geometry values are normative and were calibrated against the locked
-reference image HP11c_image.png (1280x928). baselineY and gapFrac in
-particular are photo-calibrated, not derived from first principles.
+These geometry values are normative for the reference LCD rendering.
 
-Conflict rule: if implementation and this section disagree, this section
-wins ONLY after re-measuring against the reference image. If the image has
-not changed, the implementation is wrong. If the image HAS changed,
-re-measure and update THIS section first, then the code — never the other
-way around.
-Photo-glass left edge, minus column begins here:
+Reference-image left edge, minus column begins here:
 leftEdgeFrac = 0.185
-Photo-glass right edge:
+Reference-image right edge:
 rightEdgeFrac = 0.631
-Digit baseline, bottom of digits (photo-calibrated):
+Digit baseline, bottom of digits:
 baselineY = 0.17
 Digit height, the ONLY size control:
 digitH = 0.07
-Inter-digit gap, as fraction of digitW, also minus->d1 gap  (photo-calibrated):
+Inter-digit gap, as fraction of digitW, also minus->d1 gap:
 gapFrac = 0.44
 Gap derivation mode:
 autoGap = false
@@ -1466,9 +1465,6 @@ Behavior:
 The same behavior applies when RAN# is executed inside a program.
 14.2 Generator algorithm
 ------------------------
-NOTE (verified against the ROM): the original firmware's RAN# sequence does
-NOT match the generator below (first value in SCI 7 is 0.1017980).  The LCG
-is therefore a permitted substitute, not a bit-accurate reproduction.
 The emulator MUST use a multiplicative linear congruential generator:
 S_{n+1} = (16807 * S_n) mod 2147483647
 where:
@@ -2261,8 +2257,8 @@ nnnnn   Label
 Addresses 15 through 19:
 - There is no label for these addresses.
 - The calculator reports Error 4 ("improper line number or label call"),
-  both from the keyboard and inside a running program (verified against the
-  ROM).  There is no silent no-op exception.
+  both from the keyboard and inside a running program.  There is no silent
+  no-op exception.
 If n < 0:
 - Branch directly to the displayed line number abs(n).
 - Line 000 is NOT an allowed indirect line-number target.
@@ -2712,10 +2708,10 @@ Km to miles:
 - divide by 1.6093
 Flag 0 selects operation.
 ================================================================================
-27. FIRMWARE-DERIVED IMPLEMENTATION NOTES
+27. FIRMWARE IMPLEMENTATION NOTES
 ================================================================================
-These notes are derived from disassembly and are useful for firmware-accurate
-implementations. Functional emulators MAY abstract them.
+These notes describe firmware implementation details and are useful for
+firmware-accurate implementations. Functional emulators MAY abstract them.
 27.1 Nut CPU register usage
 ---------------------------
 The Nut CPU has 16 registers of 56 bits, 14 BCD nibbles each.
@@ -3037,25 +3033,21 @@ Application test programs:
 ================================================================================
 29. DELIBERATELY OUT OF SCOPE (NOT IMPLEMENTED)
 ================================================================================
-The following behaviors are intentionally not reproduced. They are either
-hardware-service functions or explicitly optional in this specification; they
-are not required for functional conformance and are excluded from the
-differential test suite.
+The following behaviors are outside the scope of this specification. They are
+either hardware-service functions or explicitly optional; they are not
+required for functional conformance.
 
 29.1 Hardware service and self-test
 -----------------------------------
 - Power-on self-tests (ON+x, ON+plus, ON+minus), the service display test, the
   Error 9 service condition, and the keyboard test that ends with 11.
-- Low-battery sensing and the flashing '*' annunciator.  The GUI exposes a
-  manual low-battery display checkbox for visual inspection only; it does not
-  measure a battery.  (The '*' glyph itself is rendered from that control.)
+- Low-battery sensing and the flashing '*' annunciator.  A manual
+  display-test control may be provided; it does not measure a battery.
 - Automatic power-off (8-17 minutes) and sleep/wake behavior.
 - The physical keyboard scan matrix, debounce, rollover, and key-scan timing;
-  keys are delivered to the model as logical press/release events.
+  keys are treated as logical press/release events.
 - Display refresh/multiplexing timing, blink timing, and segment ghosting.
 - Continuous Memory persistence through real power loss or physical trauma.
-  A GUI may persist its own state, but the reference ROM model is started
-  fresh for each test and reports Pr Error from undefined RAM.
 - Exact cycle timings, instruction burst sizes, and interruptibility.
 
 29.2 Optional / non-normative
@@ -3063,93 +3055,14 @@ differential test suite.
 - Exact LCD glass etching beyond the reference geometry in 7.10.  The
   sister-model legends BEGIN, D.MY and C are never lit on the HP-11C.
 - Peripherals (printer, card reader, HP-IL): not part of the HP-11C.
-- Bit-exact random-number sequence.  The LCG in 14.2 is a permitted
-  substitute; the original ROM uses a different generator.
+- Bit-exact reproduction of the original firmware's pseudo-random sequence;
+  14.2 defines the required generator.
 - The radix-toggle hardware key-hold procedure (holding the decimal point at
-  power-on).  The radix conventions themselves ARE implemented and selectable
-  in the GUI, and are covered by the differential suite (13 cases, marks
-  compared against the ROM convention).
+  power-on).  The radix conventions themselves are within scope and are
+  specified in 5.5.
 
-29.3 GUI-only extensions (not part of the ROM)
-----------------------------------------------
-- The numeric inspector panel, light-all-segments checkbox, host keyboard
-  bindings, and Continuous Memory via localStorage are emulator conveniences
-  and have no ROM equivalent.
-
-================================================================================
-30. CHANGELOG
-================================================================================
-2026-08-03:
-- Added RCL Sigma+ special statistics recall: recalls R1 to X and R3 to Y,
-  does not update LAST X, is programmable, uses keycode 45 49, and produces
-  Error 3 if statistics registers are converted.
-- Added Program-mode f CLEAR PRGM behavior in Run mode: sets PC=000 only and
-  does not clear program memory or allocation.
-- Separated programmable clear instructions from non-programmable/context-
-  dependent clear keycodes. CLR Sigma and CLR REG are programmable; CLR PRGM
-  and CLR PREFIX are not normally stored.
-- Updated annunciator requirements: documented HP-11C annunciators are
-  * USER f g GRAD/RAD PRGM. BEGIN/D.MY/C are optional sister-model legends and
-  never lit.
-- Added running indication during program execution and during P_y,x/C_y,x.
-- Added explicit Error 2 conditions for y,r.
-- Added explicit statement that Sigma+ and Sigma- do not produce Error 1 on
-  accumulator overflow.
-- Added x-bar, s, L.R., and RCL Sigma+ to LAST X exceptions.
-- Updated Program-mode held SST/BST timing per actual-device verification:
-  immediate first step, 1 second initial delay, then 2 steps per second.
-- Confirmed radix/digit-separator toggle key is the decimal point key,
-  keycode element 48.
-- Added percent keycodes: g % = 43 14, g Delta% = 43 15.
-- Added random-number seed reproducibility: same seed produces same sequence.
-- Added optional self-test details from the owner's manual.
-- Added note that exact FIX fallback thresholds are implementation-defined for
-  functional conformance.
-- Added statistics precision normalization note for closely spaced data.
-- Added reverse memory conversion example for deleting below a 7-line block
-  boundary.
-- Added application-program details relevant to integration tests, including
-  Newton defaults, finance annuity-mode toggling, curve-fitting r^2 output and
-  register clearing, and triangle SSA second-solution indication.
-- Added correlation coefficient range interpretation.
-- Added SCI 7/8/9 internal rounding/trailing-9 propagation note.
-- Corrected §7.10 LCD geometry to match the calibrated implementation and the
-  locked reference image: baselineY 0.16 -> 0.17, gapFrac 0.42 -> 0.44.
-  Added provenance note and conflict rule: §7.10 geometry is photo-calibrated
-  to HP11c_image.png and is normative; spec is updated before code when the
-  reference image changes.
-
-2026-10-17 (ROM differential audit against 11c.obj on Nonpareil):
-- Corrected default display mode: FIX 4, not FIX 2 (§4.7, §28).
-- Corrected error layout: "Error" + blank + digit, 7 glyphs centred d2..d8
-  (§7.9, §28).
-- Storage arithmetic to I via indirect address 20 is valid and operates on I
-  for +, -, *, /; removed the Error 0 rule (§4.3, §16.4, §21.6, §23.1, §28).
-- Indirect branches/subroutines use the I key (f TAN, keycode 25), stored as
-  GTO I = 22 25 and GSB I = 32 25; (i) remains for indirect storage (§6.3,
-  §18.3, §21.7, §28).
-- Indirect label addresses 15..19 produce Error 4; removed the silent no-op
-  exception (§17.6, §21.7, §23.5, §28).
-- Documented that the radix mark is always displayed, including at 0 fraction
-  digits, and that FIX 0 falls back to SCI when the value rounds to zero
-  (§7.2-7.4).
-- Documented thousands-separator grouping during digit and EEX entry (§5.2,
-  §5.4).
-- Documented the physical MEM glass layout and reiterated that MEM is
-  momentary while held (§4.6).
-- Noted that the ROM's actual RAN# sequence differs from the specified LCG;
-  the LCG remains a permitted substitute (§14.2).
-- Fixed the GUI low-battery annunciator: the '*' glyph was rendered as a
-  blank; the checkbox now lights the asterisk (display test only).
-- Added differential coverage for memory allocation/Error 3 (64-line
-  conversion, reverse conversion on delete, CLEAR PRGM in both modes, 203-line
-  limit), all 36 programmable keys x plain/f/g recording (107 cases), and the
-  radix-comma convention (13 cases).
-- Added STO RAN# seed self-consistency checks (normalization and repeatability)
-  for both the ROM and the JS engine.
-- Added 29 "Deliberately out of scope" (hardware service/self-test, low-battery
-  sensing, auto-off, physical key scan, display timing, Continuous Memory
-  persistence, peripherals, RNG exactness, GUI-only extensions).
-- ROM execution coverage of the differential suite: 5287/6144 words (86.1%);
-  the remaining unhit spans are the hardware service/self-test paths and a few
-  rare math/statistics branches.
+29.3 Emulator UI conveniences
+-----------------------------
+- Numeric inspector panels, light-all-segments display tests, host keyboard
+  bindings, and host-side state persistence are outside the calculator's
+  functional behavior and are not specified here.
