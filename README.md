@@ -1,5 +1,13 @@
 # HP-11C — functional reimplementation and ROM verification
 
+[![CI](https://github.com/jspx-projects/hp11c/actions/workflows/ci.yml/badge.svg)](https://github.com/jspx-projects/hp11c/actions/workflows/ci.yml)
+[![Pages](https://github.com/jspx-projects/hp11c/actions/workflows/pages.yml/badge.svg)](https://jspx-projects.github.io/hp11c/)
+[![Live demo](https://img.shields.io/badge/demo-live-brightgreen.svg)](https://jspx-projects.github.io/hp11c/)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+[![ROM audit](https://img.shields.io/badge/ROM%20audit-308%2F310-brightgreen.svg)](verify/AUDIT.md)
+
+**Live demo:** <https://jspx-projects.github.io/hp11c/>
+
 A browser reimplementation of the HP-11C scientific programmable calculator,
 an implementation specification, and a differential test suite that checks the
 reimplementation against the **original HP-11C firmware** running on
