@@ -1,0 +1,30 @@
+# generated build artefacts
+verify/bin/
+verify/build/
+verify/**/__pycache__/
+__pycache__/
+*.pyc
+*.o
+*.ncd
+
+# local dependency, fetched separately (not redistributed)
+nonpareil/
+
+# copyrighted material: never commit the ROM, firmware, or HP manuals
+firmware/
+doc/*.pdf
+doc/*.txt
+!doc/Specification.txt
+backups/
+tmp/
+images/
+darktable_exported/
+Archive.zip
+*.JPG
+*.jpg
+*.odt
+
+# scratch / local notes
+verify/scripts/
+verify/FINDINGS.md
+*.log

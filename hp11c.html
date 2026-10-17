@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HP-11C — full reimplementation</title>
+<style>
+:root{color-scheme:light}
+*{box-sizing:border-box}
+body{margin:0;font-family:ui-monospace,Menlo,Consolas,monospace;background:#f4f2ee;color:#222}
+header{padding:14px 22px 6px;border-bottom:1px solid #ddd;background:#fff}
+header .brand{font-style:italic;font-weight:700;font-size:14px;letter-spacing:1px;color:#333}
+header h1{margin:0;font-size:26px;letter-spacing:1px}
+header .sub{margin:2px 0 0;font-size:13px;color:#555}
+header .info{margin:2px 0 0;font-size:12px;color:#777}
+.layout{display:flex;flex-wrap:wrap;gap:16px;padding:16px 22px 30px;align-items:flex-start}
+.calc-wrap{flex:1 1 620px;min-width:340px;max-width:900px}
+.calc-note{font-size:11px;color:#888;margin-top:6px}
+svg{background:transparent;touch-action:none}
+#gHot .hot{fill:rgba(0,0,0,0);cursor:pointer}
+#gHot .hot.down{fill:rgba(30,90,180,0.25)}
+svg.show-hot #gHot .hot{fill:rgba(220,40,40,0.16);stroke:rgba(220,40,40,0.6);stroke-width:1}
+.ann-blink{animation:annblink 1s steps(2,start) infinite}
+@keyframes annblink{50%{opacity:0}}
+.panels{flex:1 1 300px;min-width:280px;display:flex;flex-direction:column;gap:12px}
+.panel{background:#fff;border:1px solid #ddd;border-radius:8px;padding:10px 12px;font-size:12px}
+.panel h2{margin:0 0 6px;font-size:13px;border-bottom:1px solid #eee;padding-bottom:4px}
+#stk div,#regs div{padding:1px 0;white-space:pre}
+#meta{margin-top:6px;color:#444;line-height:1.5}
+.panel label{display:block;padding:2px 0;cursor:pointer}
+.panel button{margin-top:8px;font:inherit;padding:4px 12px;cursor:pointer}
+.kbd{font-size:12px;color:#444;line-height:1.6}
+.kbd code{background:#f0f0f0;border:1px solid #ddd;border-radius:3px;padding:0 4px}
+#bootlog{margin:0;max-height:220px;overflow:auto;font-size:11px;white-space:pre-wrap;color:#333;background:#fafafa;border:1px solid #eee;border-radius:4px;padding:6px}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">hp</div>
+  <h1>HP-11C</h1>
+  <p class="sub">Scientific Programmable · full functional reimplementation</p>
+  <p class="info">RPN · T Z Y X · lines 63→203 · regs 20 + I</p>
+</header>
+
+<div class="layout">
+  <div class="calc-wrap">
+    <svg id="svg" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+         viewBox="0 0 1280 928" preserveAspectRatio="xMidYMid meet" role="img" aria-label="HP-11C calculator">
+      <image id="face" href="HP11c_image.png" xlink:href="HP11c_image.png"
+             x="0" y="0" width="1280" height="928" preserveAspectRatio="xMidYMid meet"></image>
+      <g id="gMask"></g>
+      <g id="gAnn"></g>
+      <g id="gLcd"></g>
+      <g id="gHot"></g>
+    </svg>
+    <div class="calc-note">HP11c_image.png · 1280×928 reference · etch: [minus] d1–d10 · ann [* USER f g BEGIN GRAD D.MY C PRGM]</div>
+  </div>
+
+  <div class="panels">
+    <div class="panel">
+      <h2>Stack &amp; status</h2>
+      <div id="stk"></div>
+      <div id="meta"></div>
+    </div>
+    <div class="panel">
+      <h2>Registers R0–R9, R.0–R.9, I</h2>
+      <div id="regs"></div>
+    </div>
+    <div class="panel">
+      <h2>Controls</h2>
+      <label><input type="checkbox" id="segtest"> Light all display segments <small>(7.12)</small></label>
+      <label><input type="checkbox" id="radix"> Radix = comma (EU) <small>(5.5)</small></label>
+      <label><input type="checkbox" id="dbg"> Show key hotspots</label>
+      <label><input type="checkbox" id="lowbat"> Low battery (*) <small>(24.2)</small></label>
+      <label><input type="checkbox" id="cmem" checked> Continuous Memory <small>(4.7)</small></label>
+      <button id="reset" type="button">Reset</button>
+    </div>
+    <div class="panel">
+      <h2>Keyboard</h2>
+      <div class="kbd">
+        <code>0</code>–<code>9</code> <code>.</code> <code>Enter</code> <code>Backspace</code>
+        <code>+</code> <code>-</code> <code>*</code> <code>/</code><br>
+        <code>f</code> <code>g</code> prefixes · <code>p</code>=π · <code>r</code>=√ ·
+        <code>c</code>=CLx · <code>o</code>=ON<br>
+        hold <code>-</code> or <code>.</code> while pressing <code>o</code>: memory reset / radix toggle
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Boot / self-test</h2>
+      <pre id="bootlog"></pre>
+    </div>
+  </div>
+</div>
+
+<script>
+window.__boot = function(msg) {
+    var el = document.getElementById('bootlog');
+    if (el) el.textContent += msg + '\n';
+    if (window.console && console.log) console.log('[hp11c]', msg);
+};
+window.addEventListener('error', function(ev) {
+    if (window.__boot) window.__boot('SCRIPT ERR: ' + (ev.message || 'unknown') + ' @ ' + (ev.filename||'') + ':' + (ev.lineno||'?'));
+});
+</script>
+<script src="hp11c-engine.js"></script>
+<script src="hp11c-view.js"></script>
+</body>
+</html>

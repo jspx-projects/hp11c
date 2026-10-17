@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: JavaScript syntax and engine load
+        run: |
+          node --check hp11c-engine.js
+          node --check hp11c-view.js
+          node -e 'global.window={}; require("./hp11c-engine.js"); console.log("engine loads")'
+      - name: Python syntax
+        run: python3 -m py_compile verify/audit.py verify/compare.py verify/bridge.py

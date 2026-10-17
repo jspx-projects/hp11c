@@ -1,0 +1,3155 @@
+HP-11C CONSOLIDATED FUNCTIONAL REIMPLEMENTATION SPECIFICATION
+Revision: 2026-08-03
+Consolidated from: Specification.txt, spec_dis.txt, and cross-check against the HP-11C Owner’s Handbook and Problem Solving Guide
+Purpose: Normative functional specification for an LLM or developer to reimplement and/or audit an HP-11C emulator.
+Scope: User-visible functional behavior. Cycle-exact hardware timing is optional unless explicitly stated.
+================================================================================
+0. DOCUMENT CONVENTIONS
+================================================================================
+- MUST / MUST NOT / SHOULD / MAY are used in the RFC-2119 sense.
+- "X" means the displayed X-register.
+- "Y", "Z", "T" are the other automatic stack registers.
+- "LAST X" is the separate last-X register.
+- "I" is the Index register.
+- "R0..R9" and "R.0..R.9" are convertible data storage registers.
+- "Run mode" executes programs or keyboard operations.
+- "Program mode" records or edits program lines.
+- "User mode" exchanges the top-row alpha and primary math key behavior for keys A-E.
+- "Error x" means the logical error message for error number x.
+- Program line numbers are decimal strings 000..203.
+- Stored program keycodes are shown as decimal keycode elements:
+- Digit keys are one element: 0..9.
+- Most other keys are two elements: row*10 + column.
+- Column 10 is encoded as 0.
+- f prefix element is 42.
+- g prefix element is 43.
+- Firmware 10-bit keycodes, when mentioned, use:
+- bits 9-8: prefix (00 plain, 01 f, 10 g)
+- bits 7-4: row
+- bits 3-0: column, where 0 encodes column 10
+- row 0 is an internal firmware row for some shifted functions.
+================================================================================
+1. GENERAL SYSTEM MODEL
+================================================================================
+The HP-11C is an RPN scientific programmable calculator with:
+1. Four-level automatic memory stack:
+T, Z, Y, X
+X is displayed.
+2. Separate LAST X register.
+3. Data storage registers:
+- R0 through R9
+- R.0 through R.9
+- Index register I
+There are 20 normal convertible storage registers: R0..R9 and R.0..R.9.
+The Index register I is permanent and is included in the manual's count of
+21 data storage registers.
+4. Program memory:
+- Initial: 63 program lines, 001..063.
+- Maximum: 203 program lines, 001..203, after storage-register conversion.
+- Line 000 is the top-of-memory marker, not an instruction line.
+5. Continuous Memory:
+Preserves calculator state across normal power-off.
+6. Modes:
+- Run mode
+- Program mode
+- User mode overlay
+7. Annunciators:
+Documented HP-11C annunciators:
+*   USER   f   g   GRAD/RAD   PRGM
+HP-11C uses:
+- *       low battery, flashing
+- USER    User mode active
+- f       f prefix pending
+- g       g prefix pending
+- PRGM    Program mode active
+- GRAD    GRAD angular mode
+- RAD     same physical legend as GRAD, with the leading G unlit
+Some HP-11C LCD glass may also contain sister-model legends BEGIN, D.MY, and C.
+These legends are optional for rendering, are never lit on the HP-11C, and MAY
+be omitted by implementations that are not claiming LCD-glass-accurate physical
+rendering.
+8. Power behavior:
+- ON key turns calculator on/off.
+- Automatic shutdown after approximately 8 to 17 minutes of inactivity.
+- Continuous Memory preserved across normal power-off.
+- Low battery indicated by flashing *.
+================================================================================
+2. GLOBAL IMPLEMENTATION STATE
+================================================================================
+A conforming implementation MUST maintain at least the following state:
+Numeric state:
+- X, Y, Z, T registers
+- LAST X register
+- Current numeric entry buffer
+- Digit-entry active flag
+- Exponent-entry active flag
+Storage:
+- R0..R9
+- R.0..R.9
+- I register
+Program state:
+- Program memory lines 001..203
+- Current program line pointer / program counter PC
+- Occupied program line count
+- Program/Run mode flag
+- Pending subroutine return stack, maximum depth 4
+- Running/halted state
+Flags:
+- Flag 0
+- Flag 1
+Display state:
+- Display mode: FIX, SCI, ENG
+- Display digit setting 0..9, with SCI/ENG 8/9 aliased to 7
+- Radix mark / digit separator convention
+- Program-line separator glyph derived from radix convention
+- Annunciator state
+- Running indication state, if provided
+- Light-all-segments test state, if emulator UI provides it
+Angular state:
+- Trig mode: DEG, RAD, GRAD
+Random state:
+- Random number seed/state
+User interface state:
+- f prefix pending
+- g prefix pending
+- STO/RCL/GTO/GSB/HYP/HYP-inverse prefix pending
+- User mode enabled/disabled
+Memory allocation state:
+- Current program/storage allocation
+- Next register to convert
+- Number of program lines remaining before next conversion
+Error state:
+- Current error code, if any
+Transient state such as digit entry and pending prefixes is cleared on power-on.
+Continuous Memory does not preserve transient prefix or digit-entry state.
+================================================================================
+3. NUMERIC REPRESENTATION AND ARITHMETIC PRECISION
+================================================================================
+3.1 Internal representation
+---------------------------
+- Numbers are stored internally as decimal floating-point values with a
+10-digit mantissa and an exponent.
+- Display rounding is separate from internal precision.
+- For HP-11C-compatible results, implementations SHOULD use decimal floating
+point or BCD-emulating arithmetic. Naive binary floating point may produce
+unacceptable rounding differences.
+- Maximum finite magnitude: 9.999999999e99
+- Minimum normalized nonzero magnitude before underflow: 1.0e-99
+3.2 Rounding
+------------
+- Internal mantissa precision is 10 digits.
+- Display is rounded to the current FIX/SCI/ENG setting.
+- RND rounds the internal 10-digit mantissa to the current display setting.
+- Final results of calculations are rounded to the tenth digit internally.
+- The emulator rounding mode SHOULD be round-half-away-from-zero.
+Exact HP firmware BCD half cases may differ by at most 1 ULP in the 10th
+significant digit; this is not normally observable.
+3.3 Overflow
+------------
+Overflow occurs when a result magnitude exceeds the maximum representable value.
+Behavior:
+- Display all 9s with the appropriate sign.
+- If overflow occurs in a running program, execution halts.
+- Storage register arithmetic overflow produces Error 1 and leaves the target
+register unchanged.
+3.4 Underflow
+-------------
+Underflow occurs when a result magnitude is less than the minimum representable
+nonzero magnitude.
+Behavior:
+- Substitute zero.
+- A running program continues normally.
+- No error halt for ordinary underflow.
+================================================================================
+4. MEMORY MODEL
+================================================================================
+4.1 Automatic memory stack
+--------------------------
+Registers:
+- T
+- Z
+- Y
+- X displayed
+Stack operations are automatic. The user normally does not explicitly manage
+all stack movement.
+4.2 LAST X
+----------
+LAST X preserves the value in X before many numeric functions.
+Recall:
+- g LSTx places a copy of LAST X into X.
+LAST X is used for error recovery and repeated operations.
+4.3 Data storage registers
+--------------------------
+Initial allocation:
+- 20 normal data storage registers: R0..R9 and R.0..R.9
+- Permanent Index register I
+Storage register operations:
+- STO n stores X into register n.
+- RCL n recalls register n into X.
+- STO + n adds X to register n.
+- STO - n subtracts X from register n.
+- STO * n multiplies register n by X.
+- STO / n divides register n by X.
+- CLEAR REG clears all data storage registers to zero, including I.
+For storage arithmetic:
+- Addition:       Rn = Rn + X
+- Subtraction:    Rn = Rn - X
+- Multiplication: Rn = Rn * X
+- Division:       Rn = Rn / X
+Stack is not changed by storage arithmetic.
+X remains displayed.
+Direct storage arithmetic is limited to R0..R9.
+R.0..R.9 require indirect addressing.
+Implement:
+- Direct storage arithmetic for addresses 0..9.
+- Indirect storage arithmetic for addresses 0..19.
+- Indirect address 20 addresses I for storage/recall/exchange.
+- Indirect address 20 is ALSO valid for storage arithmetic: STO + (i),
+  STO - (i), STO * (i) and STO / (i) operate on I, with the usual
+  divide-by-zero (Error 0) and overflow (Error 1) rules.  Verified against the
+  ROM: with I=20 and X=5, the results in I are 25, 15, 100 and 4 respectively.
+4.4 Program memory
+------------------
+Program memory stores keystroke instructions.
+Initial configuration:
+- 63 available program lines: 001..063
+- 20 convertible data registers
+Maximum configuration:
+- 203 program lines: 001..203
+- Only I remains as data storage
+Each program line stores one complete instruction.
+A complete instruction may consist of 1, 2, or 3 keycodes.
+4.5 Automatic memory reallocation
+---------------------------------
+Program memory expands by converting storage registers into blocks of 7 program
+lines.
+Conversion order and line blocks:
+Register    Program lines
+R.9         064-070
+R.8         071-077
+R.7         078-084
+R.6         085-091
+R.5         092-098
+R.4         099-105
+R.3         106-112
+R.2         113-119
+R.1         120-126
+R.0         127-133
+R9          134-140
+R8          141-147
+R7          148-154
+R6          155-161
+R5          162-168
+R4          169-175
+R3          176-182
+R2          183-189
+R1          190-196
+R0          197-203
+Behavior:
+- When line 063 is full and another instruction is entered, R.9 converts to
+lines 064-070.
+- When those are full, the next register converts.
+- Deleting instructions reverses reallocation.
+- Deleting instructions below a 7-line conversion boundary releases the whole
+block that is no longer occupied.
+- Example: reducing occupied program memory from 71 lines to 70 lines releases
+lines 071-077 and restores register R.8.
+- f CLEAR PRGM is context-dependent:
+  - In Program mode: clears program memory and restores initial allocation:
+    20 normal storage registers plus permanent I, and 63 program lines.
+  - In Run mode: sets PC = 000 only. It does not clear program memory and does
+    not change memory allocation.
+- Reclaimed register blocks SHOULD be treated as zeroed after Program-mode
+CLEAR PRGM.
+4.6 MEM display
+---------------
+g MEM, held, displays current memory allocation.
+Logical format:
+- p-xx r-.x
+- p-xx: number of program lines available before next storage register
+conversion.
+- r-.x: next storage register to be converted.
+Examples:
+- p-63 r-.9
+- p-19 r-.9
+- p-02 r-.3
+Physical glass layout (verified against the ROM): p-xx occupies d1..d4, d5 and
+d6 are blank, r- occupies d7..d8, the radix mark is in d9 and the register/state
+digit is in d10.  Example (two lines used, R.9 next):  "p-61  r- .9".
+When no more registers can be converted:
+- The register field is r-? (question mark in d9).
+- The p field continues to show unused lines remaining in the current 7-line
+block, 00..06.
+- Example: p-05 r-?
+MEM display is momentary and does not alter calculator state: it is shown while
+the g MEM key is held and reverts when the key is released.
+4.7 Continuous Memory
+---------------------
+Continuous Memory preserves across normal power-off:
+- All numeric data in storage registers
+- I register
+- All programs in program memory
+- Current memory allocation
+- Display mode and setting
+- Radix convention
+- Flag settings
+- Current position in program memory, PC
+- Pending subroutine returns
+- Trig mode
+- User mode state
+- Random number seed/state
+- Stack and LAST X contents
+When turned on after normal power-off:
+- Calculator wakes in Run mode, even if it was in Program mode when turned off.
+- Prefixes and digit entry are inactive.
+- No error is displayed unless memory has been reset.
+Continuous Memory reset procedure:
+1. Turn calculator off.
+2. Press and hold ON.
+3. Press and hold minus (-).
+4. Release ON.
+5. Release minus.
+Result:
+- Memory reset.
+- Display shows Pr Error.
+- Press any key to clear.
+- State after reset:
+- Program memory empty
+- Initial allocation: 63 lines, 20 registers plus I
+- Storage registers zero
+- Stack zero
+- LAST X zero
+- Flags clear
+- Trig mode DEG
+- Display mode HP-compatible default FIX 4 (verified against the ROM: cold
+boot/no Continuous Memory shows 0.0000; 1/3 shows 0.3333)
+- Radix point convention
+- Random seed zero
+- PC = 000
+Continuous Memory may also reset after power failure or physical trauma.
+================================================================================
+5. KEYBOARD, PREFIXES, AND KEY ENTRY
+================================================================================
+5.1 Key categories and prefix behavior
+--------------------------------------
+Most keys have:
+- Primary function on key face
+- Gold alternate function selected by f
+- Blue alternate function selected by g
+Prefix behavior:
+- Press f: f annunciator appears.
+- Press g: g annunciator appears.
+- The active f/g prefix is consumed by the next non-prefix key that completes
+the sequence.
+- The f or g annunciator disappears immediately after that next key is pressed.
+- Pressing f or g again toggles or cancels the prefix.
+- f CLEAR PREFIX cancels pending prefix.
+CLEAR PREFIX also cancels:
+- STO
+- RCL
+- GTO
+- GSB
+- HYP
+- HYP inverse
+Mantissa display:
+- In Run mode, pressing and holding f CLEAR PREFIX displays the full 10-digit
+mantissa of X.
+- The mantissa is shown while the key is held.
+- After release, the display reverts to normal about one second later.
+- Pressing other keys while holding does not cancel the mantissa display.
+- Pressing another key while the mantissa is displayed does not cancel the
+display.
+- The mantissa display is non-modal; it does not alter stack or storage.
+5.2 Digit entry
+---------------
+Digit entry includes:
+- 0..9
+- Decimal point
+- CHS
+- EEX
+- Exponent digits after EEX
+- Backarrow during entry
+While a number is being keyed, the integer part of the display is grouped with
+the current digit separator (the complement of the radix mark; see 5.5).
+Example: keying 12345 displays 12,345.  Grouping applies during normal digit
+entry and while exponent digits are being keyed after EEX.
+Digit entry is terminated by most operations.
+Not terminating digit entry:
+- CHS during number entry
+- Decimal point
+- EEX
+- Exponent digits
+- Backarrow during entry
+5.3 Backarrow behavior
+----------------------
+Run mode:
+1. Outside digit entry:
+- Clears the displayed number, the X register, to zero.
+- Acts like CLx.
+- Disables stack lift.
+- Does not clear Y, Z, or T.
+- Does not change LAST X.
+2. During digit entry:
+The backarrow always deletes the rightmost DISPLAYED character of the entry.
+It never walks back through key history.
+CHS records nothing the backarrow can undo. After pressing CHS three times,
+one backarrow press deletes one digit, not three sign flips. A wrong sign is
+corrected by pressing CHS again.
+Exponent entry, after EEX, in this order:
+- While exponent digits exist, delete the rightmost exponent digit.
+- The exponent sign is deleted only once ALL exponent digits are gone, even
+when CHS was the most recent key pressed. Removing the sign leaves the
+exponent showing 00.
+- One more press removes the EEX key itself; entry continues with the
+mantissa only.
+Mantissa entry:
+- Delete the rightmost character, digit or decimal separator.
+- The mantissa sign is NEVER deleted on its own: it is deleted together with
+the last remaining character of the mantissa.
+Worked example, FIX 4:
+Keying 1 . 2 5 CHS displays -1.25, then:
+<- -> -1.2
+<- -> -1.
+<- -> -1
+<- -> 0.0000
+Keying 1 . 2 5 EEX 5 2 CHS displays 1.25____-52, then:
+<- -> 1.25____-5
+<- -> 1.25____-00
+<- -> 1.25____00
+<- -> 1.25
+When the mantissa is fully erased, digit entry REMAINS active and the
+display shows the standard formatted zero of the current display mode, for
+example 0.0000 under FIX 4.
+Further backarrow presses do nothing; the next keyed digit starts a fresh
+positive entry over X.
+Program mode:
+- Deletes the currently displayed program instruction.
+- Subsequent program instructions move up one line.
+- The display updates to the line preceding the deleted instruction.
+- The program-mode display MUST update immediately and MUST NOT blank.
+5.4 EEX entry
+-------------
+Used to enter exponents.
+Example:
+- Key mantissa
+- Press EEX
+- Key exponent digits
+- Use CHS for negative exponent
+Limits:
+- EEX will not operate with a number having more than 7 integer digits.
+- EEX will not operate with a decimal number having more than 5 zeros preceding
+the first significant digit.
+After pressing EEX:
+- The display changes so that the right two digits display the exponent.
+- The exponent area is separated from the truncated mantissa by one empty digit.
+- The user can enter one or two exponent digits.
+- Immediately after EEX, with no exponent digit keyed yet, the exponent shows
+00.
+- The mantissa integer part remains grouped with the current digit separator
+while the exponent is being keyed.
+Backarrow behavior during EEX entry:
+- If exponent digits have been entered, backarrow deletes the last exponent
+digit.
+- The exponent sign is deleted only once all exponent digits are gone; the
+exponent then shows 00.
+- One more press removes the EEX key itself.
+CHS during exponent entry changes the sign of the exponent.
+5.5 Radix mark, digit separator, and program separators
+-------------------------------------------------------
+Two radix conventions are supported:
+Convention A:
+- Radix mark = decimal point
+- Digit separator = comma
+Convention B:
+- Radix mark = decimal comma
+- Digit separator = point
+Toggle procedure:
+1. Turn calculator off.
+2. Hold the decimal point key, keycode element 48.
+3. Turn calculator on while holding key.
+4. Release key.
+Program-mode three-key instruction separators use the digit separator glyph,
+the complement of the radix mark:
+- If the radix mark is a decimal point, program-mode instruction separators are
+commas.
+- If the radix mark is a decimal comma, program-mode instruction separators are
+dots.
+Examples:
+Decimal point radix:
+- Number: 12.345
+- Program line: 002-42,21,11
+Decimal comma radix:
+- Number: 12,345
+- Program line: 002-42.21.11
+================================================================================
+6. KEYCODES AND PROGRAM INSTRUCTION ENCODING
+================================================================================
+6.1 Keycode structure
+---------------------
+Program instructions are stored as keycode elements.
+Stored program elements:
+- Digit keys: single digit 0..9.
+- Other keys: two digits rc, where r = row 1..4 and c = column 1..9, with
+column 10 encoded as 0.
+- f prefix: 42
+- g prefix: 43
+- Multi-key instructions store each element in order.
+Firmware 10-bit keycode format:
+- Bits 9-8: prefix (00=plain, 01=f, 10=g)
+- Bits 7-4: row
+- Bits 3-0: column, where 0 encodes column 10
+Row 0 is used internally for certain shifted functions. Program storage still
+uses the user-visible prefix plus base key elements described below.
+6.2 Physical key matrix and functions
+-------------------------------------
+Base element table:
+Row 1
+Base Key   Plain             f                                 g
+11   sqrt  sqrt              Run A; Program mode inserts GSB A  x^2
+12   e^x   e^x               Run B; Program mode inserts GSB B  LN
+13   10^x  10^x              Run C; Program mode inserts GSB C  LOG
+14   y^x   y^x               Run D; Program mode inserts GSB D  %
+15   1/x   1/x               Run E; Program mode inserts GSB E  Delta%
+16   CHS   CHS               pi                                 ABS
+7    7     digit 7           FIX n: 42 7 n                     DEG
+8    8     digit 8           SCI n: 42 8 n, 8/9 stored as 7    RAD
+9    9     digit 9           ENG n: 42 9 n, 8/9 stored as 7    GRAD
+10   /     divide            x<=y: 42 10                       x<0: 43 10
+Row 2
+Base Key   Plain             f                                 g
+21   SST   SST               LBL prefix: 42 21 label           BST
+22   GTO   GTO prefix        HYP prefix: 42 22 trig            HYP^-1 prefix: 43 22 trig
+23   SIN   sin               x<>(i): 42 23                     asin
+24   COS   cos               (i): 42 24                        acos
+25   TAN   tan               I: 42 25                          atan
+26   EEX   EEX               ->R: 42 26                        ->P: 43 26
+4    4     digit 4           x<>I: 42 4                        SF n: 43 4 n
+5    5     digit 5           DSE: 42 5                         CF n: 43 5 n
+6    6     digit 6           ISG: 42 6                         F? n: 43 6 n
+20   *     multiply          x>y: 42 20                        x>0: 43 20
+Row 3
+Base Key   Plain             f                                 g
+31   R/S   R/S               PSE: 42 31                        P/R
+32   GSB   GSB prefix        CLR Sigma: 42 32                  RTN: 43 32
+33   Rv    Rv                CLR PRGM: 42 33                   R^: 43 33
+34   x<>y  x<>y              CLR REG: 42 34                    RND: 43 34
+35   <-    backarrow         CLR PREFIX: 42 35                 CLx: 43 35
+36   ENTER ENTER             RAN#: 42 36                       LSTx: 43 36
+1    1     digit 1           P_y,x: 42 1                       C_y,x: 43 1
+2    2     digit 2           ->HMS: 42 2                       ->H: 43 2
+3    3     digit 3           ->RAD: 42 3                       ->DEG: 43 3
+30   -     subtract          x<>y? no, x≠y: 42 30              x≠0: 43 30
+Row 4
+Base Key   Plain             f                                 g
+41   ON    ON                none                              none
+42   f     f prefix          none                              none
+43   g     g prefix          none                              none
+44   STO   STO prefix        FRAC: 42 44                       INT: 43 44
+45   RCL   RCL prefix        USER: 42 45                       MEM: 43 45
+0    0     digit 0           x!: 42 0                          x-bar: 43 0
+48   .     decimal point     y,r: 42 48                        s: 43 48
+49   Sigma+ Sigma+           L.R.: 42 49                       Sigma-: 43 49
+40   +     add               x=y: 42 40                        x=0: 43 40
+Notes:
+- ENTER spans physical rows 3-4, column 6.
+- Plain SST, BST, P/R, ON, USER, MEM, CLR PREFIX, CLR PRGM, backarrow, and
+GTO .nnn are non-programmable or context-dependent editing/mode operations.
+- Plain R/S is programmable as an instruction.
+- f PSE is programmable.
+- Plain GTO/GSB followed by a label key is programmable.
+- Plain STO/RCL followed by register, (i), I, arithmetic operator, RAN#, or
+  Sigma+ is programmable.
+6.3 Special stored sequences
+----------------------------
+Display modes:
+- f FIX n: 42 7 n
+- f SCI n: 42 8 n, with n=8 or 9 stored as 7
+- f ENG n: 42 9 n, with n=8 or 9 stored as 7
+Flags:
+- g SF n: 43 4 n
+- g CF n: 43 5 n
+- g F? n: 43 6 n
+- n MUST be 0 or 1; n > 1 produces Error 6.
+Labels:
+- Label key elements:
+A=11, B=12, C=13, D=14, E=15
+Numeric labels 0..9 use the single digit keycode.
+- GTO label: 22 label
+- GSB label: 32 label
+- LBL label: 42 21 label
+Examples:
+- GTO A: 22 11
+- GSB A: 32 11
+- LBL A: 42 21 11
+- LBL 0: 42 21 0
+Index and indirect:
+- I key: 25
+- (i) key: 24
+- STO I: 44 25
+- RCL I: 45 25
+- x<>I: 42 4
+- STO (i): 44 24
+- RCL (i): 45 24
+- x<>(i): 42 23
+- GTO I (indirect branch): 22 25
+- GSB I (indirect subroutine): 32 25
+Random and LAST X:
+- f RAN#: 42 36
+- STO RAN#: 44 36
+- g LSTx: 43 36
+Percent functions:
+- g %: 43 14
+- g Delta%: 43 15
+Statistics recall:
+- RCL Sigma+: 45 49
+Storage arithmetic:
+- STO + n: 44 40 n
+- STO - n: 44 30 n
+- STO * n: 44 20 n
+- STO / n: 44 10 n
+- STO + (i): 44 40 24
+- STO - (i): 44 30 24
+- STO * (i): 44 20 24
+- STO / (i): 44 10 24
+Conditional tests:
+- f x<=y: 42 10
+- f x>y: 42 20
+- f x<>y: 42 30
+- f x=y: 42 40
+- g x<0: 43 10
+- g x>0: 43 20
+- g x<>0: 43 30
+- g x=0: 43 40
+Hyperbolic functions:
+- HYP SIN: 42 22 23
+- HYP COS: 42 22 24
+- HYP TAN: 42 22 25
+- HYP^-1 SIN: 43 22 23
+- HYP^-1 COS: 43 22 24
+- HYP^-1 TAN: 43 22 25
+Clear functions:
+Programmable clear instructions:
+- CLR Sigma: 42 32
+- CLR REG: 42 34
+Non-programmable or context-dependent clear keycodes:
+- CLR PRGM: 42 33
+- CLR PREFIX: 42 35
+Normal Program-mode entry MUST NOT store CLR PRGM or CLR PREFIX as program
+instructions. If an imported program image contains these keycodes, behavior
+MAY be treated as implementation-defined or context-dependent.
+6.4 Abbreviated key sequences and duplicate firmware keycodes
+-------------------------------------------------------------
+Some instructions do not require an expected f prefix.
+If an unnecessary prefix is pressed, it is not stored.
+Canonical stored examples:
+- RCL I: 45 25
+- RCL (i): 45 24
+- STO RAN#: 44 36
+- GSB A: 32 11
+- GTO A: 22 11
+Firmware dispatch duplicates exist for some functions, for example:
+- pi may appear as firmware keycode 0x105 or 0x116
+- x=y may appear as 0x130 or 0x140
+- x=0 may appear as 0x200 or 0x240
+- asin may appear as 0x203 or 0x223
+A firmware-accurate implementation SHOULD accept duplicate raw keycodes.
+Program storage SHOULD use the canonical elements above.
+================================================================================
+7. DISPLAY, ANNUNCIATORS, AND PHYSICAL LCD RENDERING
+================================================================================
+This section is the single authority for the display. It defines logical
+content and a reference physical rendering.
+7.1 Display modes
+-----------------
+Three display modes: FIX, SCI, ENG.
+Selected by:
+- f FIX n
+- f SCI n
+- f ENG n
+where n = 0..9.
+In Run Mode these are TWO-STEP operations:
+- The shifted key alone does not change the mode.
+- The calculator waits for a following primary digit 0-9.
+- A non-digit key cancels the pending change.
+These operations are stack-neutral.
+In Program Mode, FIX/SCI/ENG followed by a digit is recorded as one program
+instruction.
+SCI/ENG visible fraction is capped at 6 digits.
+SCI 8 and SCI 9 are aliased to SCI 7 for storage and behavior.
+ENG 8 and ENG 9 are aliased to ENG 7 for storage and behavior.
+Program keycodes:
+- f SCI 8 -> 42 8 7
+- f SCI 9 -> 42 8 7
+- f ENG 8 -> 42 9 7
+- f ENG 9 -> 42 9 7
+7.2 FIX mode
+------------
+FIX n shows n digits after the radix mark, rounded for display only.
+The radix mark itself is always displayed, even when n = 0 (for example,
+FIX 0 of 3 displays 3.).
+The internal 10-digit mantissa is retained.
+If the value is too large or too small for FIX, the display falls back to a
+SCI-like form and returns to FIX when possible.
+Exact fallback thresholds are implementation-defined for functional
+conformance. A display-accurate implementation SHOULD match HP-11C FIX
+fallback behavior.
+7.3 SCI mode
+------------
+SCI n shows scientific notation:
+- one digit before the radix mark (the radix mark is always displayed, even
+  when n = 0)
+- n decimal places requested
+- at most 6 visible fraction digits
+SCI 7 affects internal display-rounded behavior but still shows at most 6
+displayed fraction digits.
+SCI 7, 8, and 9 can move rounding into internal digits beyond the visible
+display. If one or more trailing 9s exist internally following the last digit
+allowed by the display setting, rounding may propagate into the displayed
+digits.
+7.4 ENG mode
+------------
+ENG n shows engineering notation:
+- exponent a multiple of 3
+- leading significant digit always present
+- the radix mark is always displayed, even when the visible fraction is empty
+n is the number of ADDITIONAL significant digits after the leading digit, NOT
+the number of digits after the radix mark.
+Because 1, 2, or 3 digits may appear before the radix mark, the visible
+fraction length can be one or two less than n. That is correct behavior.
+Examples, ENG 3:
+1234.567   -> 1.235e3
+12345.678  -> 12.35e3
+123456.789 -> 123.5e3
+ENG 7 affects internal display-rounded behavior but still shows at most 6
+displayed fraction digits.
+7.5 Mantissa display, held
+--------------------------
+In Run mode, holding f CLEAR PREFIX shows the full 10-digit mantissa of X.
+The display is momentary:
+- shown while held
+- reverting to normal about one second after release
+- not canceled by other key presses
+When shown, the mantissa fills all ten digit positions, left-aligned.
+7.6 Annunciators
+----------------
+The annunciator row is etched into the glass like the digit columns.
+The documented HP-11C annunciator legends are:
+*   USER   f   g   GRAD/RAD   PRGM
+Meaning:
+- * low battery, flashing
+- USER user mode
+- f f-prefix pending
+- g g-prefix pending
+- PRGM program mode
+- GRAD lights whole GRAD legend in GRAD mode
+- RAD lights the RAD portion of the same physical legend in RAD mode
+Some physical HP-11C LCDs may also contain sister-model legends BEGIN, D.MY,
+and C. These legends are optional for rendering and MUST never be lit on the
+HP-11C.
+Unlit annunciators draw nothing, no ghosting.
+The f and g annunciators are momentary:
+- lit while the prefix is pending
+- extinguished the instant the next non-prefix key is pressed
+The annunciator row sits below the digit baseline and is never overlapped by
+the digit field.
+The annunciators remain visible at all times, including during the error
+display.
+7.7 The fixed 11-column display matrix, logical placement
+---------------------------------------------------------
+All numeric and program content, everything except the annunciator row and the
+low-battery '*', is laid out on a fixed physical matrix of eleven columns:
+[minus] [d1] [d2] [d3] [d4] [d5] [d6] [d7] [d8] [d9] [d10]
+The minus sign is a DEDICATED column to the left of the ten digit positions.
+It is not one of the ten digits.
+Every glyph is drawn at the SAME size; there is NO reduced-size exponent font.
+Decimal points, thousands separators, and program-line keycode separators are
+NOT extra positions: each is drawn in the gap immediately to the RIGHT of the
+digit it belongs to.
+Universal justification rule:
+The MANTISSA is ALWAYS LEFT-justified, starting at d1.
+It is NEVER right-justified.
+If the mantissa has more cells than its window, the least-significant
+rightmost cells fall off the right edge of the window.
+Mantissa window size:
+- 10 positions, d1..d10, when there is no exponent.
+- 7 positions, d1..d7, when an exponent block is present.
+Exponent block, present only when the formatter emits the gap cell:
+- d8 = exponent sign '-' if exponent negative, else BLANK.
+- d9,d10 = two exponent digits, RIGHT-justified and ZERO-padded to two digits
+on the LEFT.
+Immediately after EEX, with no exponent digit keyed yet, the display shows two
+zeros.
+The first keyed digit replaces the right zero, d10.
+The second fills d9.
+Any blank positions fall BETWEEN the mantissa and d8.
+Examples:
+FIX 4, X = 0:
+0.0000
+entry 1.23:
+1.23
+entry 1.23 then EEX:
+1.23____00
+then CHS:
+1.23____-00
+then 2:
+1.23____-02
+SCI 2, X = 123:
+1.23__ 02
+7.8 Program-mode matrix mapping and shared-column rule
+------------------------------------------------------
+Program mode uses the LLL-iiiiii format.
+It maps the ten display cells ONE-TO-ONE onto d1..d10:
+- d1-d3 = line number
+- d4 = hyphen, rendered as the middle segment g of digit column d4
+- d5-d10 = six instruction positions
+Instructions are right-aligned.
+Separator rule:
+Program-mode three-key instruction separators use the current digit separator
+glyph, the complement of the radix mark:
+- radix point -> program separators are commas
+- radix comma -> program separators are dots
+The separator draws in the gap to the right of its digit, exactly like radix
+and thousands marks.
+SHARED-COLUMN RULE:
+The minus column and the ten digit columns are fixed at identical x-coordinates
+in Run mode and Program mode.
+Program mode does NOT reclaim the minus column.
+The minus column is RESERVED and rendered UNLIT in Program mode.
+Consequently the first program digit, the line-number hundreds digit in d1,
+starts at the SAME x as the first Run-mode mantissa digit.
+An implementation that gives Program mode a separate, left-anchored column
+origin is NON-CONFORMING.
+7.9 Error display
+-----------------
+An error is displayed centered as:
+Error x
+where x is the error number 0..9.
+The error message is rendered on the physical 11-column matrix using only
+etched segment glyphs.
+"Error" is spelled with 7-segment letters:
+- E = adefg
+- r = eg
+- o = cdeg
+The seven-glyph group "Error n" (the word Error, one blank column, then the
+digit) is centered within d1..d10, occupying columns d2..d8.  Verified against
+the ROM: sqrt(-4) displays E at d2, rror at d3..d6, a blank at d7 and 0 at d8.
+Pr Error is rendered the same way as:
+P r E r r o r
+centered within columns d2..d9.
+The annunciator row is unaffected by an error display.
+Annunciators that are active remain lit while the error is shown.
+Press any key to clear the error display.
+7.10 Physical LCD glyph rendering, reference implementation
+-----------------------------------------------------------
+The reference implementation renders the LCD with slanted-italic seven-segment
+glyphs taken from a 34 x 50 design space.
+Segment thickness: 7
+Slant: approximately 3.9 degrees
+Outer-corner radius: 3.5
+Segment shapes: hexagonal/pentagonal with pointed internal joints
+Segment paths, design coordinates, 0,0 = top-left of the 34x50 box:
+a  M30.73,1.08 L23.41,8.08 L11.30,8.08 L5.19,1.08 Z
+b  M32.69,2.08 L31.41,21.20 L29.28,22.77 L24.46,19.14 L24.99,9.09 Z
+c  M28.93,47.49 L31.11,26.20 L28.95,24.47 L23.52,28.55 L22.36,41.17 Z
+d  M27.48,48.72 L20.94,41.72 L8.72,41.72 L2.03,48.72 Z
+e  M0.91,47.69 L2.17,26.83 L4.09,25.22 L9.08,28.98 L8.14,40.53 Z
+f  M3.99,3.20 L2.35,21.88 L4.28,23.42 L9.78,19.31 L10.49,9.99 Z
+g  M11.09,20.38 L23.45,20.38 L27.93,23.88 L22.83,27.38 L10.17,27.38
+L5.61,23.88 Z
+Rounded-corner clip path, digit outline:
+M7.68,1.08 L29.26,1.08 A3.5,3.5 0 0 1 32.47,4.57 L29.09,45.23
+A3.5,3.5 0 0 1 25.30,48.72 L4.35,48.72 A3.5,3.5 0 0 1 1.09,45.23
+L3.94,4.57 A3.5,3.5 0 0 1 7.68,1.08 Z
+Segment-on map:
+0 abcdef
+1 bc
+2 abged
+3 abgcd
+4 fgbc
+5 afgcd
+6 afgedc
+7 abc
+8 abcdefg
+9 abcdfg
+- g
+Comma tail, local coords, origin = dot top-left; dot = 7.339 x 7.0:
+M-0.493,8.022 C2.298,8.659 3.931,8.590 6.618,8.267
+C3.864,10.553 -0.151,15.979 -2.153,14.472
+C-3.390,12.508 -1.403,10.273 -0.493,8.022 Z
+Reference parameters, fractions of the locked image size W x H.
+
+These geometry values are normative and were calibrated against the locked
+reference image HP11c_image.png (1280x928). baselineY and gapFrac in
+particular are photo-calibrated, not derived from first principles.
+
+Conflict rule: if implementation and this section disagree, this section
+wins ONLY after re-measuring against the reference image. If the image has
+not changed, the implementation is wrong. If the image HAS changed,
+re-measure and update THIS section first, then the code — never the other
+way around.
+Photo-glass left edge, minus column begins here:
+leftEdgeFrac = 0.185
+Photo-glass right edge:
+rightEdgeFrac = 0.631
+Digit baseline, bottom of digits (photo-calibrated):
+baselineY = 0.17
+Digit height, the ONLY size control:
+digitH = 0.07
+Inter-digit gap, as fraction of digitW, also minus->d1 gap  (photo-calibrated):
+gapFrac = 0.44
+Gap derivation mode:
+autoGap = false
+Faint unlit-minus rendering:
+minusGhost = false
+Faint OFF segments inside lit digits:
+ghostSegments = false
+LCD glass mask rect:
+lcdFx,lcdFy,lcdFw,lcdFh = 0.1762, 0.076, 0.478, 0.1495
+Annunciator baseline:
+annBaselineY = 0.2
+Annunciator height, font-size:
+annH = 0.026
+Gap between parts of a multi-segment legend, e.g. GRAD = "G" + "RAD":
+annPartGap = 0.02
+Lit segment colour:
+COL_ON = #1a1a1a
+Unlit ghost colour:
+COL_OFF = rgba(26,26,26,0.055)
+Scaling rule:
+Every glyph is scaled with ONE uniform factor:
+s = digitH_px / 50
+Rendered width is always:
+34*s = digitH_px*34/50
+Glyphs are NEVER stretched.
+Layout formulas:
+digitH_px = digitH*H
+s = digitH_px/50
+digitW = 34*s
+segH = 7*s
+minusW = 22.3*s
+left = leftEdgeFrac*W
+right = rightEdgeFrac*W
+baseline = baselineY*H
+digitTop = baseline - digitH
+if autoGap == false:
+gap = gapFrac * digitW
+if autoGap == true:
+gap = max(0, (right - left - minusW - 10*digitW)/11)
+minusCtr   = left + minusW/2
+d1         = left + minusW + gap
+columnX(i) = d1 + i*(digitW + gap), i = 0..9
+sepX(i)    = columnX(i) + digitW + gap/2
+Both Run mode and Program mode place digits with columnX() and marks with
+sepX(). There is no second, mode-specific origin.
+Radix / thousands / program separator geometry:
+- The mark is a rounded rectangle whose height equals segH.
+- width = 7.339*(segH/7)
+- corner radius = 1.576*(segH/7)
+- Its BOTTOM edge sits 0.2*segH ABOVE the baseline.
+- It is centred horizontally in the gap, sepX(i).
+A separator renders as a COMMA, dot plus tail, or as a plain DOT according to
+the convention.
+For numbers:
+- a decimal separator shows the tail iff radix == ','
+- a thousands separator shows the tail iff separator == ','
+For program-mode three-key instruction separators:
+- use the digit separator glyph
+- if radix == '.', program separators are commas
+- if radix == ',', program separators are dots
+Minus-column glyph:
+- A slanted rectangle occupying the segment-g vertical band, design y
+20.38..27.38.
+- half-width 11.15
+- top edge shifted right by 0.47 design units
+- centred at minusCtr
+It is painted lit for a negative Run-mode value.
+Otherwise it is blank, or painted in COL_OFF when minusGhost is true.
+The exponent sign re-uses this same slanted rectangle, lit, centred in d8.
+The program-line hyphen in d4 is NOT this glyph: it is the pointed middle
+segment g of digit column d4.
+Ghost rule:
+- Within a digit position that is IN USE, off segments may be drawn in COL_OFF
+for a realistic LCD appearance.
+- A digit position that is UNUSED draws nothing.
+- The minus column is either lit or blank, or, with minusGhost, a single faint
+bar; it is never a full ghost digit.
+Annunciator-bar reservation:
+- The digits occupy only the band [digitTop .. baseline].
+- The entire region BELOW the baseline is left EMPTY for digits and is reserved
+for the annunciator row and visual breathing room.
+- Digits and marks MUST NOT extend below the baseline.
+7.11 Etched annunciator rendering
+---------------------------------
+Documented HP-11C annunciator legends are physically present at fixed
+positions:
+*   USER   f   g   GRAD/RAD   PRGM
+Optional sister-model legends BEGIN, D.MY, and C MAY be rendered if present on
+the target LCD image, but they MUST remain unlit. Omitting them is conforming
+unless the implementation claims exact physical LCD-glass rendering.
+Unlit legends render BLANK.
+There is intentionally NO ghosting effect for annunciators.
+RAD is NOT a separate legend:
+- The physical GRAD annunciator is a two-segment glyph, "G" + "RAD".
+- GRAD mode lights both segments.
+- RAD mode lights the "RAD" segment alone, leaving the G unlit.
+The annunciator row is always visible:
+- an error display does not blank it
+- active annunciators remain lit while an error is shown
+7.12 Emulator display test control
+----------------------------------
+The emulator UI MUST provide a checkbox to light all display segments.
+Placement:
+- This checkbox MUST be in the same UI row as the radix-mark checkbox.
+Behavior when checked:
+- All LCD segments are lit for visual inspection.
+- This includes digit segments, decimal/thousands separators, minus column,
+exponent sign/digits where applicable, and annunciator legends.
+- It does not alter calculator state.
+- It does not alter program memory, stack, storage, flags, or mode state.
+When unchecked:
+- The display returns to normal calculator-driven rendering.
+7.13 Running indication
+-----------------------
+While a program is running, and during execution of P_y,x or C_y,x, the
+display SHOULD show a flashing "running" indication.
+This is a transient user-visible indication only:
+- It does not alter calculator state.
+- It does not alter stack, storage, flags, program memory, or PC.
+Exact rendering is optional for functional emulation.
+================================================================================
+8. RPN STACK BEHAVIOR
+================================================================================
+8.1 Basic stack model
+---------------------
+Registers:
+T
+Z
+Y
+X displayed
+8.2 ENTER
+---------
+ENTER separates two numbers keyed one after another.
+Effect:
+- T <- Z
+- Z <- Y
+- Y <- X
+- X unchanged
+- Old T is lost
+- Stack lift is disabled for the next digit entry
+ENTER does not update LAST X.
+8.3 Stack lift on digit entry
+-----------------------------
+If stack lift is enabled, keying a new number causes:
+- T <- Z
+- Z <- Y
+- Y <- X
+- X <- new number
+If stack lift is disabled, keying a new number overwrites X only.
+8.4 Stack drop on two-number functions
+--------------------------------------
+For ordinary two-number functions:
+- Operation uses Y and X.
+- Result placed in X.
+- Stack drops:
+Y <- Z
+Z <- T
+T unchanged
+- LAST X usually receives old X.
+8.5 One-number functions
+------------------------
+For ordinary one-number functions:
+- X is replaced by result.
+- Y, Z, T unchanged.
+- LAST X usually receives old X.
+- Stack lift is enabled for subsequent digit entry.
+8.6 Stack manipulation functions
+--------------------------------
+x<>y:
+- Exchanges X and Y.
+R down:
+- Rotates stack down.
+- X <- Y
+- Y <- Z
+- Z <- T
+- T <- old X
+R up:
+- Inverse of R down.
+- X <- T
+- T <- Z
+- Z <- Y
+- Y <- old X
+Stack manipulation functions do not update LAST X.
+8.7 Stack lift categories
+-------------------------
+Stack-disabling operations:
+- ENTER
+- CLx
+- Sigma plus
+- Sigma minus
+- Backarrow when it acts as full display clear
+Stack-enabling operations:
+- Most numeric functions
+- Most mathematical operations
+- x<>y, Rv, R^
+- Switching from Program mode to Run mode
+- Turning calculator off then on
+Neutral operations:
+Operations that do not change existing stack-lift state include many mode and
+editing operations, such as:
+- FIX
+- SCI
+- ENG
+- DEG
+- RAD
+- GRAD
+- GTO .nnn
+- BST
+- SST in Program mode
+- MEM
+- USER
+- P/R
+- CLEAR PREFIX
+- CLEAR REG
+- CLEAR Sigma
+- PREFIX
+- R/S
+- PSE
+CHS:
+- neutral during digit entry of a number from keys
+- otherwise CHS enables stack lift
+8.8 LAST X behavior
+-------------------
+LAST X is updated before many numeric functions.
+General rule:
+- When a numeric function uses X as an argument, old X is copied to LAST X
+before replacement.
+Operations that save old X in LAST X include:
+- +, -, *, /
+- y^x
+- 1/x
+- sqrt
+- x^2
+- x!
+- ABS
+- INT
+- FRAC
+- RND
+- LN
+- LOG
+- e^x
+- 10^x
+- SIN, COS, TAN
+- asin, acos, atan
+- HYP SIN, HYP COS, HYP TAN
+- HYP^-1 SIN, HYP^-1 COS, HYP^-1 TAN
+- %
+- Delta%
+- ->P
+- ->R
+- ->HMS
+- ->H
+- ->RAD
+- ->DEG
+- P_y,x
+- C_y,x
+- Sigma plus
+- Sigma minus
+- y,r
+Exceptions:
+- ENTER does not update LAST X.
+- RCL operations do not update LAST X.
+- STO operations do not update LAST X.
+- Stack manipulation operations do not update LAST X.
+- Conditional tests do not update LAST X.
+- Flag operations do not update LAST X.
+- RAN# does not update LAST X.
+- x-bar does not update LAST X.
+- s does not update LAST X.
+- L.R. does not update LAST X.
+- RCL Sigma+ does not update LAST X.
+================================================================================
+9. BASIC NUMERIC FUNCTIONS
+================================================================================
+9.1 Pi
+------
+Key: f CHS, or appropriate pi key.
+Behavior:
+- Places 3.141592654 in X.
+- Stack lifts if enabled.
+- Does not update LAST X.
+9.2 Sign and number alteration
+------------------------------
+CHS:
+- Changes sign of displayed number.
+- During exponent entry, changes sign of exponent.
+- Does not update LAST X.
+ABS:
+- X = absolute value of X.
+- Updates LAST X.
+INT:
+- X = integer portion of X.
+- Fractional digits replaced by zero.
+- Updates LAST X.
+FRAC:
+- X = fractional portion of X.
+- Integer portion replaced by zero.
+- Updates LAST X.
+RND:
+- Rounds internal 10-digit mantissa to current display setting.
+- Updates LAST X.
+9.3 Reciprocal
+--------------
+1/x:
+- X = 1 / X
+- Error 0 if X = 0.
+- Updates LAST X.
+9.4 Factorial and Gamma
+-----------------------
+x! behavior:
+1. Nonnegative integer n, 0 <= n <= 69:
+- result = n!
+2. Positive non-integer x:
+- x! returns Gamma(x + 1)
+- Example: 1.5 x! -> approximately 1.329340388
+3. Negative x:
+- returns the largest negative finite value
+- that is, -9.999999999e99
+- no Error 0 is produced
+4. Large positive integer n:
+- for n >= 70, returns the largest positive finite value
+- that is, +9.999999999e99
+The Gamma relation remains:
+- To compute Gamma(x), compute x - 1, then x!.
+x! updates LAST X.
+9.5 Square root and square
+--------------------------
+sqrt:
+- X = sqrt(X)
+- Error 0 if X < 0.
+- Updates LAST X.
+x^2:
+- X = X^2
+- Updates LAST X.
+9.6 Exponential and logarithmic functions
+-----------------------------------------
+e^x:
+- X = e^X
+- Updates LAST X.
+10^x:
+- X = 10^X
+- Updates LAST X.
+LN:
+- X = natural log of X
+- Error 0 if X <= 0
+- Updates LAST X.
+LOG:
+- X = base-10 log of X
+- Error 0 if X <= 0
+- Updates LAST X.
+9.7 Two-number exponential
+--------------------------
+y^x:
+- Uses Y as base, X as exponent.
+- Result in X.
+- Stack drops.
+- Updates LAST X with old X.
+Errors:
+- y = 0 and x <= 0: Error 0
+- y < 0 and x non-integer: Error 0
+================================================================================
+10. TRIGONOMETRY AND ANGULAR CONVERSIONS
+================================================================================
+10.1 Trig modes
+---------------
+Modes:
+- DEG: degrees, no angular annunciator
+- RAD: radians, RAD annunciator
+- GRAD: grads, GRAD annunciator
+Mode selection:
+- g DEG
+- g RAD
+- g GRAD
+Continuous Memory preserves trig mode.
+After memory reset or power loss, default is DEG.
+Selecting a trig mode does not convert numbers already in the calculator. It
+only changes the unit used by trig functions and angular conversions.
+10.2 Trig functions
+-------------------
+Primary:
+- SIN
+- COS
+- TAN
+Inverse:
+- asin
+- acos
+- atan
+Behavior:
+- Use current trig mode.
+- Result replaces X.
+- LAST X updated.
+Errors:
+- asin domain: |x| > 1, Error 0
+- acos domain: |x| > 1, Error 0
+10.3 Hyperbolic functions
+-------------------------
+Functions:
+- sinh
+- cosh
+- tanh
+- asinh
+- acosh
+- atanh
+Errors:
+- acosh:
+- Error 0 if x < 1
+- No error at x = 1
+- acosh(1) = 0
+- atanh:
+- Error 0 if |x| > 1
+- No error at x = 1
+- No error at x = -1
+- atanh(1) returns +9.999999999e99
+- atanh(-1) returns -9.999999999e99
+All hyperbolic functions update LAST X.
+10.4 Degrees/radians conversions
+--------------------------------
+->RAD:
+- Converts decimal degrees to radians.
+- X = X * pi / 180
+- Updates LAST X.
+->DEG:
+- Converts radians to decimal degrees.
+- X = X * 180 / pi
+- Updates LAST X.
+10.5 Time and angle conversions
+-------------------------------
+Formats:
+- Decimal hours/degrees: H.h or D.d
+- Hours/degrees, minutes, seconds: H.MMSSs...
+Internal H.MS representation:
+- value = H + MM/100 + SS.s.../10000
+- H = hours/degrees integer part
+- MM = minutes, two digits 00-59
+- SS = seconds, two digits 00-59
+- fractional seconds continue after SS
+->HMS:
+- Converts decimal hours or degrees to H.MMSSs format.
+- Updates LAST X.
+->H:
+- Converts H.MMSSs format to decimal hours or degrees.
+- Updates LAST X.
+Example:
+17.553 decimal -> 17.33108000 internal/displayed with sufficient digits
+Meaning:
+17 hours/degrees
+33 minutes
+10.8 seconds
+================================================================================
+11. PERCENT FUNCTIONS
+================================================================================
+11.1 Percent
+------------
+To compute percentage:
+1. Key base number.
+2. ENTER.
+3. Key percent rate.
+4. Press %.
+Result:
+- X = base * rate / 100
+- Y remains base
+- LAST X receives rate
+- Stack does not lift.
+Stored keycode:
+- g % = 43 14
+11.2 Percent difference
+-----------------------
+To compute percent difference:
+1. Key base number.
+2. ENTER.
+3. Key second number.
+4. Press Delta%.
+Formula:
+result = 100 * (second - base) / base
+Positive result: increase.
+Negative result: decrease.
+Behavior:
+- X = result
+- Y remains base
+- LAST X receives second number
+- Stack does not lift.
+Error:
+- base = 0 produces Error 0.
+Stored keycode:
+- g Delta% = 43 15
+================================================================================
+12. POLAR/RECTANGULAR CONVERSIONS
+================================================================================
+12.1 Rectangular to polar
+-------------------------
+Input:
+- X = x
+- Y = y
+Operation:
+- ->P
+Output:
+- X = r = sqrt(x^2 + y^2)
+- Y = theta = atan2(y, x)
+Theta:
+- In current trig mode.
+- Returned between -180 and +180 degrees, or equivalent radians/grads.
+Stack:
+- Two-number function, stack drops.
+- LAST X receives old X.
+12.2 Polar to rectangular
+-------------------------
+Input:
+- X = r
+- Y = theta
+Operation:
+- ->R
+Output:
+- X = x = r cos(theta)
+- Y = y = r sin(theta)
+Theta interpreted according to current trig mode.
+Stack:
+- Two-number function, stack drops.
+- LAST X receives old X.
+================================================================================
+13. PROBABILITY FUNCTIONS
+================================================================================
+13.1 Permutation
+----------------
+P_y,x:
+- y in Y
+- x in X
+Result:
+P(y,x) = y! / (y-x)!
+13.2 Combination
+----------------
+C_y,x:
+- y in Y
+- x in X
+Result:
+C(y,x) = y! / (x! * (y-x)!)
+13.3 Common behavior
+--------------------
+- Result placed in X.
+- Stack drops.
+- x placed in LAST X.
+- A running indicator SHOULD flash during long calculations.
+- A running indicator SHOULD also flash during program execution.
+13.4 Input constraints
+----------------------
+Inputs MUST be nonnegative integers.
+Errors, Error 0:
+- x or y non-integer
+- x or y negative
+- x > y
+- x >= 10^10
+- y >= 10^10
+Maximum valid input value is 10^10 - 1.
+================================================================================
+14. RANDOM NUMBER GENERATOR
+================================================================================
+14.1 Random number generation
+-----------------------------
+Key: f RAN#
+Behavior:
+- Generates pseudo-random number r where 0 <= r < 1.
+- New random number appears in X.
+- The generator state advances on every activation.
+- Repeated activations MUST normally produce different numbers.
+- Stack behavior is similar to recall from storage register:
+- if stack lift is enabled, stack lifts
+- if stack lift is disabled, X is overwritten without lift
+- RAN# does not update LAST X.
+The same behavior applies when RAN# is executed inside a program.
+14.2 Generator algorithm
+------------------------
+NOTE (verified against the ROM): the original firmware's RAN# sequence does
+NOT match the generator below (first value in SCI 7 is 0.1017980).  The LCG
+is therefore a permitted substitute, not a bit-accurate reproduction.
+The emulator MUST use a multiplicative linear congruential generator:
+S_{n+1} = (16807 * S_n) mod 2147483647
+where:
+- 16807 = 7^5
+- 2147483647 = 2^31 - 1
+- S is an integer state in [1, 2147483646]
+Displayed result:
+- X = S_{n+1} / 2147483647
+14.3 Seed
+---------
+To store seed:
+- Key seed value 0 <= n < 1
+- STO RAN#
+Seed normalization:
+- If seed magnitude >= 1, the decimal point is shifted left of the first
+significant digit before scaling.
+- Example: 123.0, 12.3, and 0.123 all normalize to 0.123.
+- Use the normalized magnitude in [0,1).
+- Multiply normalized value by 2147483646 and round to produce integer state.
+- If resulting state is 0, treat it as 1 on first activation.
+Repeated use of the same seed value produces repetitions of the same random
+number sequence.
+After memory reset or power failure:
+- Seed state is zero.
+- First RAN# after reset treats state 0 as 1.
+Exact bit-for-bit sequence compatibility with original HP-11C firmware is not
+required for this specification.
+================================================================================
+15. STATISTICS FUNCTIONS
+================================================================================
+15.1 Statistics registers
+-------------------------
+Sigma accumulation uses R0 through R5:
+R0 = n
+R1 = sum x
+R2 = sum x^2
+R3 = sum y
+R4 = sum y^2
+R5 = sum xy
+If one or more of R0 through R5 have been converted to program memory, attempts
+to execute statistical functions produce Error 3.
+Statistical functions include Sigma+, Sigma-, CLEAR Sigma, x-bar, s, L.R.,
+y,r, and RCL Sigma+.
+15.2 Clearing statistics
+------------------------
+f CLEAR Sigma:
+- Clears R0 through R5.
+- Clears stack.
+- Does not alter LAST X.
+Use before new accumulation.
+If any of R0..R5 are converted to program memory, CLEAR Sigma produces Error 3.
+15.3 Accumulating statistics
+----------------------------
+Sigma plus:
+- Input y in Y, x in X.
+- Adds statistical contributions to R0..R5.
+- X becomes n.
+- Y remains unchanged.
+- LAST X receives old X.
+- Stack lift disabled.
+For one-variable statistics:
+- Ensure Y = 0 for each Sigma plus.
+Sigma minus:
+- Removes statistical contributions of a data pair.
+- Use same x,y pair as originally accumulated.
+- X becomes n.
+- Y remains unchanged.
+- LAST X receives old X.
+- Stack lift disabled.
+Unlike direct or indirect storage-register arithmetic, Sigma+ and Sigma- allow
+overflow to occur in storage registers R0 through R5 without indicating
+Error 1. A running program does not halt solely because a statistics
+accumulator overflowed.
+Correction procedure:
+1. Enter incorrect x,y pair.
+2. Press Sigma minus.
+3. Enter correct x,y pair.
+4. Press Sigma plus.
+Rounding errors from erroneous entries may not be perfectly removed.
+15.4 Mean
+---------
+Key: g x-bar
+Output:
+- X = mean x = sum x / n
+- Y = mean y = sum y / n
+Stack lifts in the same manner as RCL Sigma+.
+Does not save X in LAST X.
+Error:
+- n = 0 produces Error 2.
+15.5 Sample standard deviation
+------------------------------
+Key: g s
+Formulas:
+sx = sqrt((n*sum x^2 - (sum x)^2) / (n*(n-1)))
+sy = sqrt((n*sum y^2 - (sum y)^2) / (n*(n-1)))
+Output:
+- X = sx
+- Y = sy
+Stack lifts in the same manner as RCL Sigma+.
+Does not save X in LAST X.
+Errors:
+- n <= 1 produces Error 2.
+- Division by zero or invalid square root in formula produces Error 2.
+15.6 Population standard deviation
+----------------------------------
+The s function returns sample standard deviation.
+To compute true population standard deviation:
+- Add the mean to the data using Sigma plus.
+- Then press s.
+This changes accumulation registers and SHOULD be used with care.
+15.7 Linear regression
+----------------------
+Key: f L.R.
+Model:
+y = A x + B
+Inputs:
+- Use Sigma plus to accumulate statistics of two or more data pairs.
+Outputs:
+- X = B, the y-intercept
+- Y = A, the slope
+Formulas:
+A = (n*sum xy - sum x*sum y) / (n*sum x^2 - (sum x)^2)
+B = (sum y*sum x^2 - sum x*sum xy) / (n*sum x^2 - (sum x)^2)
+Stack lifts in the same manner as RCL Sigma+.
+Does not save X in LAST X.
+Errors:
+- n <= 1 produces Error 2.
+- Division by zero in denominator produces Error 2.
+- Invalid square root in correlation computations produces Error 2.
+15.8 Linear estimation and correlation
+--------------------------------------
+y,r function:
+- Input known x in X.
+- Output:
+X = estimated y
+Y = correlation coefficient r
+- LAST X receives input x.
+- Stack lifts once.
+Correlation coefficient:
+r = (n*sum xy - sum x*sum y) /
+sqrt((n*sum x^2 - (sum x)^2) * (n*sum y^2 - (sum y)^2))
+The correlation coefficient ranges from +1 to -1:
+- r = +1: exact positive linear fit
+- r = -1: exact negative linear fit
+- r = 0: no linear approximation
+Errors:
+- n <= 1 produces Error 2.
+- Division by zero in the regression/correlation denominator produces Error 2.
+- A negative square-root intermediate produces Error 2.
+- Numerically degenerate accumulated statistics may produce Error 2.
+There is no dedicated x-estimation key.
+To estimate x from y:
+- Compute regression coefficients with f L.R.
+- X = B intercept
+- Y = A slope
+- Manually compute:
+x_hat = (y - B) / A
+Statistics precision note:
+When data values are very close together, statistical computations can lose
+precision. If s, r, L.R., or y,r fails with Error 2, normalize the data by
+entering deviations from an approximate mean, then add that approximate mean
+back to x-bar, y, or the y-intercept as appropriate.
+15.9 Recall statistics sums
+---------------------------
+Key: RCL Sigma+
+Behavior:
+- X <- R1, the accumulated sum of x values.
+- Y <- R3, the accumulated sum of y values.
+If stack lift is enabled:
+- The stack lifts in the same manner as if two numbers had been keyed in
+  sequence.
+- A conforming HP-compatible model is:
+  - T <- old Y
+  - Z <- old X
+  - Y <- R3
+  - X <- R1
+  - old T is lost
+If stack lift is disabled:
+- X <- R1
+- Y <- R3
+- Z and T remain unchanged
+RCL Sigma+:
+- does not update LAST X
+- is treated as a statistical function for Error 3 purposes
+- produces Error 3 if any of R0..R5 has been converted to program memory
+Canonical keycode elements:
+- RCL prefix: 45
+- Sigma+ key: 49
+- Stored sequence: 45 49
+RCL Sigma+ is programmable.
+================================================================================
+16. STORAGE REGISTER OPERATIONS
+================================================================================
+16.1 Store
+----------
+STO n:
+- Copies X into register n.
+- X unchanged.
+- Stack unchanged.
+- Does not update LAST X.
+16.2 Recall
+-----------
+RCL n:
+- Copies register n into X.
+- If stack lift enabled, stack lifts.
+- If stack lift disabled, X overwritten without lift.
+- Does not update LAST X.
+RCL Sigma+ is a special statistics recall described in §15.9.
+16.3 Clear registers
+--------------------
+CLEAR REG:
+- Clears R0..R9, R.0..R.9, and I to zero.
+- Does not affect stack or LAST X.
+16.4 Storage arithmetic
+-----------------------
+STO + n:
+- Rn = Rn + X
+STO - n:
+- Rn = Rn - X
+STO * n:
+- Rn = Rn * X
+STO / n:
+- Rn = Rn / X
+Stack unchanged.
+X unchanged.
+Errors:
+- STO / n where X = 0 produces Error 0.
+- Storage register overflow produces Error 1.
+- If overflow would occur, the register remains unchanged.
+- Indirect storage arithmetic to I via address 20 produces Error 0.
+================================================================================
+17. PROGRAMMING MODEL
+================================================================================
+17.1 What is a program?
+-----------------------
+A program is a stored sequence of keystrokes.
+Program execution:
+- Behaves as if keys were pressed manually.
+- Stack responds the same as in keyboard operation.
+- Final displayed result SHOULD match manual keystroke result.
+17.2 Program mode and program counter semantics
+----------------------------------------------
+Enter Program mode:
+- g P/R
+Indicators:
+- PRGM annunciator on.
+- Display shows current line number and keycode.
+- Entering Program mode MUST NOT blank the display.
+P/R behavior:
+- P/R toggles between Run mode and Program mode.
+- P/R preserves the current PC.
+- Entering Program mode does not reset PC.
+- Leaving Program mode does not reset PC.
+Program counter, PC:
+- PC is the displayed program line number.
+- PC = 000 is the top-of-memory marker.
+- PC = 000 is always valid, even if program memory is empty.
+- PC > 000 is the next instruction to be executed in Run mode.
+- PC is advanced automatically only:
+1. after entering a complete instruction in Program mode, or
+2. when an instruction is executed.
+- The user may set PC directly with GTO .nnn.
+- GTO .nnn moves PC only; it does not execute instructions.
+Line numbering:
+- Line 000 is the top-of-memory marker and contains no instruction.
+- Line 001 is the first occupied instruction line.
+- Line N is the Nth occupied instruction line.
+Internal mapping:
+If program memory is stored internally as a zero-based array:
+- displayed line 001 corresponds to internal index 0
+- displayed line 002 corresponds to internal index 1
+- displayed line N corresponds to internal index N - 1
+Execution from PC:
+- If PC = 001, execution starts at line 001.
+- If PC = 002, execution starts at line 002.
+- If PC = 000 and a program exists, R/S starts execution at line 001.
+- If PC = 000 and no program exists, R/S does nothing.
+- If PC is explicitly set to a nonexistent occupied line, Error 4 occurs.
+- Normal execution past the last occupied line is not an error.
+Firmware-derived implementation details:
+- The PC MAY be represented as RAM register 14.
+- The subroutine return stack MAY be represented as RAM register 15 and
+associated storage.
+- Conditional tests skip exactly one program line by incrementing PC by 2
+instead of 1.
+- Program execution SHOULD be interruptible; firmware used execution chunks of
+about 200 instructions to allow key scanning and halt.
+17.3 Program line display format
+--------------------------------
+The program line display uses 10 display positions:
+LLL-iiiiii
+where:
+LLL    = three-digit line number, 000..203
+-      = hyphen
+iiiiii = six instruction positions
+Line 000 is the top-of-memory marker and has no instruction.
+The first occupied instruction is line 001.
+After a complete instruction is entered, the display moves to the newly
+recorded instruction line and shows its keycode elements.
+Keycode display rules:
+- Most keycodes are displayed as two digits.
+- Digit keycodes are displayed as one digit.
+- Digit keycodes are not padded with a filler zero.
+- Instructions are right-aligned in the six instruction positions.
+Separator rules:
+1. One-key instruction:
+- Display the keycode alone, right-aligned.
+Example, digit key 3, decimal point radix:
+003-     3
+Example, R/S keycode 31:
+003-    31
+2. Two-key instruction:
+- Separate the two keycodes with one blank position.
+- Right-align the whole group in the six instruction positions.
+Example, g RTN, keycodes 43 32:
+008- 43 32
+Display cells:
+0 0 8 - space 4 3 space 3 2
+3. Three-key instruction:
+- Use all six instruction positions.
+- Separate keycode fields with the program separator glyph.
+- Do not use blank separator positions between the three keycodes.
+- If a keycode is one digit, display it as blank + digit inside its
+two-position field.
+Example, f LBL A, keycodes 42 21 11, decimal point radix:
+002-42,21,11
+Display cells:
+0 0 2 - 4 2 2 1 1 1
+The separators are attached to the previous digit cell:
+one after 42, one after 21.
+Example, f LBL 0, keycodes 42 21 0, decimal point radix:
+002-42,21, 0
+Display cells:
+0 0 2 - 4 2 2 1 space 0
+If radix is decimal comma, the same examples use dots:
+002-42.21.11
+002-42.21. 0
+The separators used for three-key instructions are not extra display positions.
+They are separator segments attached to existing digit cells.
+17.4 Loading a program
+----------------------
+Procedure:
+1. Enter Program mode.
+2. Move to line 000 or desired insertion point.
+3. Optionally clear program memory with f CLEAR PRGM.
+4. Key instructions.
+Behavior:
+- Nothing is stored until a complete instruction is entered.
+- Each complete instruction occupies one line.
+- Existing instructions below insertion point move down.
+17.5 Beginning and ending programs
+----------------------------------
+Beginning:
+- Use LBL label.
+- Labels: A-E and 0-9.
+Ending:
+- Use g RTN.
+- If end of occupied memory is reached, behavior is like RTN if not in
+subroutine.
+17.6 Labels and duplicate labels
+--------------------------------
+Labels act as addresses for programs, branches, and subroutines.
+Labels may be alpha A-E or numeric 0-9.
+When a label is encountered during normal sequential execution, execution falls
+through the label and continues with the next instruction.
+Duplicate labels are permitted.
+Behavior:
+- A GTO or GSB label search starts at the current program position.
+- It searches downward, toward higher line numbers.
+- It finds the FIRST matching label encountered after the current position.
+- If the end of memory is reached, the search wraps to line 001 and continues.
+- If no matching label is found, Error 4 occurs (including indirect label
+addresses 15..19, which are also Error 4).
+Duplicate labels are not recommended, but they are legal.
+17.7 Running a program
+----------------------
+Run mode only.
+To run alpha-labeled program:
+- Normal mode: f A through f E.
+- User mode: press A through E directly.
+Label search:
+- Starts at current program position.
+- Searches downward.
+- If end reached, wraps to line 001.
+- Continues searching.
+- If label not found, Error 4.
+Execution:
+- Begins at instruction after label.
+- Continues until RTN, R/S, error, end of memory, or key press.
+Pressing any key while a program is running halts execution.
+If a key is pressed while a number is being placed in X by a running program,
+the calculator does not halt in the middle of the digit entry sequence. The
+entire number is written, and the following line is executed before the
+calculator halts.
+While a program is running, a running indication SHOULD be shown.
+17.8 Program stops
+------------------
+R/S instruction:
+- Halts program execution when encountered.
+- PC is left at the next program line.
+- If the R/S instruction is on the last occupied line, PC wraps to 000.
+Keyboard R/S in Run mode:
+- If program is running: halt execution.
+- If program is stopped: start or resume execution at PC.
+- If PC = 000 and a program exists: start execution at line 001.
+- If PC = 000 and no program exists: do nothing.
+Resume behavior:
+- If stopped at an R/S instruction, execution begins with the next line.
+- If stopped by a key press, execution resumes where it left off.
+- If PC = 000, execution begins at line 001 if a program exists.
+17.9 Program pause
+------------------
+PSE instruction:
+- Halts execution temporarily, about 1 second.
+- Displays X.
+- Automatically resumes.
+Multiple PSE instructions lengthen pause.
+17.10 Stops, end of program, and error stops
+--------------------------------------------
+Normal stops:
+RTN outside a subroutine:
+- PC becomes 000.
+- Execution halts.
+- No error.
+End of occupied program memory:
+- Execution stops.
+- PC wraps to 000.
+- No Error 4.
+R/S instruction:
+- Execution halts.
+- PC is left at the next line.
+- If the next line is beyond the last occupied line, PC wraps to 000.
+Keyboard R/S while running:
+- Execution halts.
+- PC remains at the current execution position.
+Any key press while running:
+- Execution halts.
+- PC remains at the current execution position.
+- If the program is in the middle of writing a number into X, the full number
+is written and the following line is executed before halting.
+Error stops:
+- An error condition halts execution.
+- PC remains at the line that caused the error.
+- Display shows Error x.
+- Press any key to clear the error display.
+- Clearing the error does not resume execution.
+- Enter Program mode to inspect the offending program line.
+17.11 Non-programmable and context-dependent functions
+------------------------------------------------------
+The following are non-programmable or context-dependent:
+- f CLEAR PRGM
+- f CLEAR PREFIX
+- P/R
+- SST as editing key
+- BST as editing key
+- g MEM held
+- GTO .nnn direct line-positioning form
+- ON
+- USER
+- Backarrow as editing/clear key
+Programmable forms:
+- GTO followed by a label key is programmable.
+- GSB followed by a label key is programmable.
+- GTO I is programmable as 22 25 (GTO + I key, f TAN).
+- GSB I is programmable as 32 25 (GSB + I key, f TAN).
+- R/S instruction is programmable.
+- PSE is programmable.
+- CLR REG and CLR Sigma are programmable as shifted instructions.
+- RCL Sigma+ is programmable.
+Non-programmable direct positioning:
+- GTO .nnn is not recorded as a program instruction.
+- GTO .nnn moves PC only.
+- GTO .nnn does not execute instructions.
+17.12 Direct label keys f A-E
+-----------------------------
+Run mode:
+- f A through f E execute the program starting at the corresponding label.
+- In User Mode, the prefix f is not required:
+pressing A through E directly executes the corresponding labeled program.
+Program mode:
+- f A through f E insert a GSB label instruction.
+- Example: f A inserts GSB A.
+To insert a LBL label instruction:
+- Use f LBL followed by the label key.
+- Example: f LBL A inserts LBL A.
+================================================================================
+18. PROGRAM EDITING
+================================================================================
+18.1 SST
+--------
+Program mode:
+Press and release:
+- Moves PC forward one occupied program line.
+- Does not execute instructions.
+- Wraps from the last occupied line to line 000.
+- Wraps from line 000 to the first occupied line.
+- If program memory is empty, PC remains 000.
+Press and hold:
+- The first step occurs immediately on press.
+- The newly displayed line remains visible for an initial delay of 1 second.
+- After the initial delay, scrolling continues at 2 steps per second, one step
+  every 0.5 second, while held.
+Run mode:
+SST always shows, and on release executes, the line at PC, except when PC = 000,
+in which case it shows and executes line 001.
+Detailed behavior:
+- PC is the next instruction to execute.
+- If PC = 000 and a program exists, SST displays line 001 while held; on
+release it executes line 001.
+- After execution, PC advances normally.
+- Pressing SST again then displays line 002; on release it executes line 002.
+- If PC is manually set, for example by GTO .002, SST displays line 002; on
+release it executes line 002.
+- If PC = 000 and no program exists, SST does nothing.
+- A short press therefore executes one step.
+- If execution advances past the last occupied line:
+- execution stops
+- PC wraps to 000
+- no Error 4 occurs
+18.2 BST
+--------
+Program mode:
+Press and release:
+- Moves PC backward one occupied program line.
+- Does not execute instructions.
+- Wraps from line 000 to the last occupied line.
+- Wraps from the first occupied line to line 000.
+- If program memory is empty, PC remains 000.
+Press and hold:
+- The first step occurs immediately on press.
+- The newly displayed line remains visible for an initial delay of 1 second.
+- After the initial delay, scrolling continues at 2 steps per second, one step
+  every 0.5 second, while held.
+Run mode:
+- Moves PC backward one occupied program line.
+- Does not execute program code.
+- Wraps from line 000 to the last occupied line.
+- Wraps from the first occupied line to line 000.
+- If program memory is empty, PC remains 000.
+18.3 GTO .nnn, GTO label, and programmable line branches
+--------------------------------------------------------
+GTO .nnn:
+- Direct line positioning.
+- Requires exactly three digits after the decimal point.
+- Works in both Program mode and Run mode.
+- Moves PC only.
+- Does not execute instructions.
+- Is not recorded as a program instruction.
+Valid targets:
+- GTO .000 is always valid and sets PC = 000.
+- GTO .001 through GTO .NNN are valid only if that line is occupied.
+- If the target line does not contain an instruction, Error 4 occurs.
+- On Error 4, PC remains unchanged.
+GTO label:
+- GTO followed immediately by A-E or 0-9 is a label branch.
+- In Program mode, it records a programmable GTO label instruction.
+- In Run mode, it sets PC to the line containing that label.
+- It does not immediately execute the target line.
+- If the label is not found, Error 4 occurs.
+GSB label:
+- GSB followed immediately by A-E or 0-9 is a label subroutine call.
+- In Program mode, it records a programmable GSB label instruction.
+- In Run mode, it executes the program starting at that label.
+- If the label is not found, Error 4 occurs.
+Programmable line branches:
+- To branch to a specific line number inside a program, use GTO I or GSB I
+with a negative value in the index register I.
+- The indirect-branch operand is the I key, f TAN, keycode 25.  Stored
+sequences are GTO I = 22 25 and GSB I = 32 25.  (The (i) key, f COS, keycode
+24, is only for indirect storage: STO (i) = 44 24, RCL (i) = 45 24.)
+- The f prefix may be omitted (abbreviated sequence); it is never stored.
+- If I < 0, the target line is the displayed line number abs(I).
+- If I >= 0, the target is an indirect label.
+GSB .nnn:
+- Direct dotted line positioning is specified for GTO .nnn.
+- GSB .nnn direct line positioning is not required.
+- For programmable subroutine calls to a line number, use GSB I with negative
+I.
+18.4 Deleting instructions
+--------------------------
+Procedure:
+1. Enter Program mode.
+2. Move to instruction line.
+3. Press backarrow.
+Effect:
+- Displayed instruction deleted.
+- Subsequent instructions move up one line.
+- Calculator displays line preceding deleted line.
+- The program-mode display MUST update immediately and MUST NOT blank.
+Deleting lines may convert program memory back to storage registers.
+18.5 Inserting instructions
+---------------------------
+Procedure:
+1. Enter Program mode.
+2. Move to line immediately before desired insertion point.
+3. Key new instruction.
+Effect:
+- New instruction inserted after current line.
+- Subsequent instructions move down one line.
+- The display moves to the newly inserted instruction line.
+If current line is 000:
+- The new instruction becomes line 001.
+If current line is the last occupied line:
+- The new instruction is appended as the next line.
+If all 203 lines are occupied:
+- Insertion attempt causes Error 4.
+- Program memory unchanged.
+================================================================================
+19. PROGRAM DECISIONS AND CONTROL
+================================================================================
+19.1 Conditional tests
+----------------------
+Tests compare X to Y or X to zero.
+Available tests and stored keycodes:
+f x<=y     42 10
+f x>y      42 20
+f x<>y     42 30
+f x=y      42 40
+g x<0      43 10
+g x>0      43 20
+g x<>0     43 30
+g x=0      43 40
+Behavior:
+- If test true: execute next program line.
+- If test false: skip exactly one program line.
+- Conditional tests are stack-neutral.
+- Conditional tests do not update LAST X.
+19.2 Flags
+----------
+Flags:
+- Flag 0
+- Flag 1
+Operations:
+- g SF n: set flag n
+- g CF n: clear flag n
+- g F? n: test flag n
+Flag test behavior:
+- If flag set: execute next line.
+- If flag clear: skip one line.
+Flags persist until cleared or memory reset.
+Flag operations are stack-neutral and do not update LAST X.
+Flag number > 1 produces Error 6.
+19.3 Branching
+--------------
+GTO label:
+- Unconditional branch.
+- Searches downward for label.
+- Wraps at end of memory.
+Conditional branch:
+- Conditional test followed by GTO.
+- If test true, GTO executed.
+- If false, GTO skipped.
+19.4 Looping
+------------
+Loop:
+- GTO backward to earlier label.
+- Conditional test controls exit.
+Infinite loop:
+- Unconditional backward GTO.
+================================================================================
+20. SUBROUTINES
+================================================================================
+20.1 GSB
+--------
+GSB label:
+- Transfers execution to label.
+- Creates pending return.
+RTN:
+- If pending return exists:
+return to instruction after most recent GSB.
+- If no pending return:
+go to line 000 and halt.
+20.2 Nesting
+------------
+Subroutines may call subroutines.
+Maximum nesting depth:
+- 4 pending returns.
+Attempting fifth nested subroutine:
+- Error 5.
+No limit on number of non-nested subroutine calls.
+================================================================================
+21. INDEX REGISTER
+================================================================================
+21.1 Direct Index operations
+----------------------------
+STO I:
+- Store X into I.
+RCL I:
+- Recall I into X.
+x<>I:
+- Exchange X and I.
+21.2 Loop control number format
+-------------------------------
+ISG and DSE use a control number in I:
+nnnnn.xxxyy
+where:
+- nnnnn = current counter value
+- xxx = test value
+- yy = increment or decrement value
+Rules:
+- nnnnn may be 1 to 5 digits.
+- If unspecified, nnnnn defaults to 0.
+- xxx should be three digits.
+- yy should be two digits.
+- If yy unspecified, default is 01.
+Examples:
+2.05002
+- current counter = 2
+- test value = 050
+- increment = 02
+0.00602
+- current counter = 0
+- test value = 006
+- increment = 02
+21.3 ISG
+--------
+ISG:
+- Increment I by yy.
+- If new nnnnn > xxx, skip next program line.
+- Otherwise execute next program line.
+21.4 DSE
+--------
+DSE:
+- Decrement I by yy.
+- If new nnnnn <= xxx, skip next program line.
+- Otherwise execute next program line.
+21.5 ISG/DSE limits
+-------------------
+- Can increment/decrement any displayable number.
+- If integer portion exceeds five digits, decimal portion may round.
+- If yy is lost due to rounding, next increment defaults to 01.
+21.6 Indirect addressing
+------------------------
+Indirect Index register functions do not affect the contents of I.
+They use the nnnnn integer portion of the number stored in I as an address.
+Indirect Storage and Recall:
+STO (i) and RCL (i) store or recall numbers using the data storage register
+addressed by the absolute value of nnnnn.
+For addressing R0 through R9:
+nnnnn = 0 through 9
+For addressing R.0 through R.9:
+nnnnn = 10 through 19
+For addressing I:
+nnnnn = 20
+Exchange X, Indirect:
+x<> (i) exchanges the contents of X with the contents of the storage register
+addressed by the absolute value of nnnnn.
+Indirect Storage Register Arithmetic:
+STO + (i)
+STO - (i)
+STO * (i)
+STO / (i)
+performs storage register arithmetic on the contents of the storage register
+addressed by the absolute value of nnnnn.
+Storage arithmetic to I via indirect address 20 is invalid and produces
+Error 0.
+Examples:
+If 5.01202 is stored in the Index register:
+nnnnn = 5
+xxx = 012
+yy = 02
+Then:
+STO (i)     behaves like STO 5
+x<> (i)     exchanges X-register and R5 contents
+STO + (i)   behaves like STO + 5
+21.7 Indirect branches and subroutines
+--------------------------------------
+GTO I and GSB I (indirect branch operand = I key, f TAN, keycode 25):
+Let n be the integer part of I.
+If n >= 0:
+- Branch downward to the label addressed by n.
+- Search wraps at end of memory.
+Label indirect addresses:
+nnnnn   Label
+0       LBL 0
+1       LBL 1
+2       LBL 2
+3       LBL 3
+4       LBL 4
+5       LBL 5
+6       LBL 6
+7       LBL 7
+8       LBL 8
+9       LBL 9
+10      LBL A
+11      LBL B
+12      LBL C
+13      LBL D
+14      LBL E
+Addresses 15 through 19:
+- There is no label for these addresses.
+- The calculator reports Error 4 ("improper line number or label call"),
+  both from the keyboard and inside a running program (verified against the
+  ROM).  There is no silent no-op exception.
+If n < 0:
+- Branch directly to the displayed line number abs(n).
+- Line 000 is NOT an allowed indirect line-number target.
+- Valid occupied targets are lines 001 through the last occupied line.
+- If abs(n) = 0, Error 4 occurs.
+- If abs(n) is greater than the last occupied line, Error 4 occurs.
+Example:
+GTO I with I = -0.1 produces Error 4, because the effective line target is 0,
+and line 000 is not allowed as an indirect line-number target.
+================================================================================
+22. USER MODE
+================================================================================
+22.1 Purpose
+------------
+User mode saves keystrokes when running programs labeled A-E.
+The idea is to be able to press labels without having to use the f key.
+22.2 Behavior
+-------------
+When User mode is active:
+- USER annunciator appears.
+- The white primary and gold alternate meanings of the first five keys of the
+top row are exchanged.
+Exact exchanged legends:
+sqrt -> A
+e^x -> B
+10^x -> C
+y^x -> D
+1/x -> E
+In Run mode:
+- Normal: f A runs program A.
+- User mode: A runs program A.
+- User mode: f sqrt performs square root.
+- User mode: f e^x performs e^x.
+- User mode: f 10^x performs 10^x.
+- User mode: f y^x performs y^x.
+- User mode: f 1/x performs reciprocal.
+Deactivate:
+- f USER.
+User mode state is preserved by Continuous Memory.
+================================================================================
+23. ERROR CONDITIONS
+================================================================================
+Error display:
+- The logical error display is centered text: Error x
+- x is the error number.
+- Documented error numbers include 0..9.
+- Error 0 is retained.
+- Annunciators remain visible.
+- Press any key to clear.
+Error halt behavior:
+- When an error occurs during program execution, execution halts immediately.
+- The PC remains at the line that caused the error.
+- Pressing any key clears the error display but does not resume execution.
+- The user must enter Program mode to inspect the offending line.
+Firmware-derived implementation note:
+- Error state MAY be stored in RAM register 7.
+23.1 Error 0: Improper mathematical operation
+---------------------------------------------
+Conditions include:
+- y^x invalid:
+- y = 0 and x <= 0
+- y < 0 and x non-integer
+- sqrt(x) where x < 0
+- 1/x where x = 0
+- LOG(x) where x <= 0
+- LN(x) where x <= 0
+- asin(x) where |x| > 1
+- acos(x) where |x| > 1
+- acosh where x < 1
+- atanh where |x| > 1
+- Delta % where base Y = 0
+- STO / n where X = 0
+- Indirect storage arithmetic to I via address 20
+- P_y,x or C_y,x invalid:
+- non-integer
+- negative
+- x > y
+- x >= 10^10
+- y >= 10^10
+Factorial/Gamma:
+- x! does not produce Error 0 for negative arguments or large positive integer
+arguments.
+- negative x returns -9.999999999e99
+- large positive integer n >= 70 returns +9.999999999e99
+23.2 Error 1: Storage register overflow
+---------------------------------------
+Condition:
+- Storage register arithmetic would produce magnitude too large.
+Behavior:
+- Register remains unchanged.
+- Displayed number returns after clearing error.
+Applies to storage arithmetic except Sigma plus/Sigma minus.
+Sigma+ and Sigma- do not produce Error 1 for accumulator overflow.
+23.3 Error 2: Improper statistical operation
+--------------------------------------------
+Conditions:
+- n = 0 for mean
+- sample standard deviation with n <= 1
+- linear regression with n <= 1
+- y,r with n <= 1
+- division by zero or sqrt negative in statistical formulas
+- numerically degenerate statistical accumulations may also produce Error 2
+23.4 Error 3: Improper register number
+--------------------------------------
+Conditions:
+- Named storage register currently converted to program memory.
+- Nonexistent storage register.
+- If one or more of R0 through R5 are converted to program memory, attempts to
+execute statistical functions result in Error 3.
+23.5 Error 4: Improper line number or label call
+------------------------------------------------
+Conditions:
+- Called line number unoccupied.
+- Called line number nonexistent, greater than 203.
+- Attempt to load more than 203 program lines.
+- Called label does not exist.
+- Indirect line-number target 000 is invalid.
+- Indirect label addresses 15..19 are not valid labels: Error 4 occurs.
+23.6 Error 5: Subroutine level too deep
+---------------------------------------
+Condition:
+- Subroutine nesting exceeds four pending returns.
+23.7 Error 6: Improper flag number
+----------------------------------
+Condition:
+- Attempted flag number > 1.
+23.8 Error 9: Service
+---------------------
+Condition:
+- Self-test or service condition.
+23.9 Pr Error
+-------------
+Condition:
+- Continuous Memory reset because of power failure or manual reset procedure.
+================================================================================
+24. POWER, SELF-TEST, AND SERVICE BEHAVIOR
+================================================================================
+24.1 Auto-off
+-------------
+- Calculator turns off after 8 to 17 minutes inactive.
+- Continuous Memory preserved.
+24.2 Low battery
+----------------
+- Flashing * indicates low power.
+- With alkaline batteries, at least 2 hours continuous running after indicator.
+- With silver-oxide, at least 15 minutes continuous running after indicator.
+24.3 Self-tests
+---------------
+Self-test exact displays are optional for functional emulation.
+For calculator not responding:
+- Press x and ON simultaneously.
+- If still not responding, remove and reinsert batteries.
+- If still not responding, short battery terminals momentarily with batteries
+  installed.
+- If still not responding, install fresh batteries.
+For calculator responding:
+1. With calculator off, hold ON and press x.
+2. Release ON, then release x.
+3. Complete electronic test starts.
+4. running flashes.
+5. After about 25 seconds, display should show all 8s and annunciators, except
+   the * low-power indicator.
+6. Error 9, blank display, or improper result indicates service condition.
+Additional firmware/service tests, optional for functional emulation:
+- ON + plus:
+  - Similar electronic test.
+  - May continue indefinitely.
+  - Can be terminated by pressing any key; test should halt within about 25
+    seconds.
+- ON + minus:
+  - Keyboard/display test.
+  - After ON is released, certain display segments are lit.
+  - Press keys left-to-right by row, top row to bottom row.
+  - ENTER is pressed both with the third-row keys and with the fourth-row
+    keys.
+  - If all keys are pressed in proper order and calculator is functioning,
+    display shows 11.
+  - Incorrect key order or malfunction displays Error 9.
+These tests are not required for basic conformance unless firmware-accurate
+self-test behavior is desired.
+================================================================================
+25. OPTIONAL APPLICATION PROGRAMS AS TEST SPECIFICATIONS
+================================================================================
+The manual includes user-enterable application programs. These are useful as
+integration tests.
+The following subsections summarize functional behavior and program-specific
+details relevant to testing. Exact line-by-line program listings and register
+maps in the owner's manual are normative for these integration tests only when
+the manual program listings are being used verbatim.
+25.1 Matrix Algebra
+-------------------
+Functionality:
+- Compute determinant of 3x3 matrix.
+- Compute inverse if determinant nonzero.
+- Solve 3x3 linear system.
+Errors:
+- Singular matrix: Error 0.
+Notes:
+- Matrix operations are prone to roundoff.
+- Uses many storage registers and subroutines.
+- A 2x2 matrix SHOULD be stored as a 3x3 matrix of the form:
+  a11 a12 0
+  a21 a22 0
+  0   0   1
+- If solving several systems with the same matrix, compute the determinant
+  first, then use the simultaneous-equations portion with the stored
+  determinant.
+25.2 Systems of Linear Equations With Three Unknowns
+---------------------------------------------------
+Functionality:
+- Solve AX = B using Cramer's rule.
+If Det A = 0:
+- System linearly dependent.
+- Program terminates with Error 0.
+If Det A near zero:
+- Significant roundoff error possible.
+25.3 Newton's Method
+--------------------
+Functionality:
+- Solve f(x) = 0.
+- User defines f(x) in program memory.
+- User supplies initial guess x0.
+Iteration:
+x_{i+1} = x_i - f(x_i) / f'(x_i)
+Derivative approximated numerically.
+Program-specific details:
+- Main program is 68 steps and uses registers 0 through 4.
+- User-defined f(x) may use remaining memory and registers.
+- Default tolerance epsilon is 1e-8.
+- Default Ax limit is 1e-8.
+- Maximum iteration count is initialized to 50.
+- If the maximum iteration count is exceeded, the program produces an
+  application-specific Error 4 condition.
+- The final root is displayed and also stored in register 2.
+Errors:
+- Division by zero possible: Error 0.
+- Too many iterations may produce program-specific Error 4 conditions.
+25.4 Numerical Integration by Discrete Points
+---------------------------------------------
+Functionality:
+- Approximate integral from equally spaced points.
+Trapezoidal rule:
+integral approx h/2 * [f(x0) + 2*sum interior f(xj) + f(xn)]
+Simpson's rule:
+integral approx h/3 * [
+f(x0)
++ 4*f(x1)
++ 2*f(x2)
++ 4*f(x3)
++ ...
++ 4*f(x_{n-1})
++ f(xn)
+]
+Requirement:
+- n must be even for Simpson's rule.
+- If n odd, Error 0.
+25.5 Curve Fitting
+------------------
+Supported curves:
+1. Exponential: y = a e^{b x}, a > 0
+2. Logarithmic: y = a + b ln x
+3. Power: y = a x^b, a > 0
+Method:
+- Transform to linear form Y = A + b X.
+- Use least squares.
+Codes:
+1 exponential
+2 logarithmic
+3 power
+Outputs:
+- a
+- b
+- coefficient of determination r^2
+Input restrictions:
+- Logarithmic: x must be positive nonzero.
+- Exponential: y must be positive nonzero.
+- Power: x and y must be positive nonzero.
+Program-specific note:
+- During operation, the program clears storage registers. Data stored in extra
+  registers may be destroyed.
+25.6 Triangle Solutions
+-----------------------
+Functionality:
+- Solve plane triangle sides, angles, area.
+Supported cases:
+- SSS
+- ASA
+- AAS/SAA
+- SAS
+- SSA ambiguous case
+Notes:
+- Angular mode must match input angular units.
+- H.MS conversion can convert degrees/minutes/seconds.
+- Accuracy may degrade for extremely small angles.
+- If inputs are selected clockwise around the triangle, outputs follow a
+  clockwise order.
+SSA ambiguous case:
+- After the first triangle solution, pressing R/S indicates whether an
+  alternative triangle exists.
+- Display 0 means no alternative triangle.
+- Display 2 means a second triangle is possible, after which the second
+  solution can be reviewed.
+25.7 t Statistics
+-----------------
+Paired t statistics:
+D_i = x_i - y_i
+D_bar = sum D / n
+S_D = sqrt((sum D^2 - (sum D)^2/n) / (n-1))
+t = D_bar / (S_D / sqrt(n))
+df = n - 1
+Two-mean t statistic:
+Independent samples x and y, equal unknown variance.
+x_bar = sum x / n1
+y_bar = sum y / n2
+pooled variance:
+sp^2 = ((sum x^2 - n1*x_bar^2) + (sum y^2 - n2*y_bar^2)) / (n1 + n2 - 2)
+t = (x_bar - y_bar - d) / sqrt(sp^2 * (1/n1 + 1/n2))
+df = n1 + n2 - 2
+25.8 Chi-Square Evaluation
+--------------------------
+Goodness-of-fit statistic:
+chi^2 = sum ((O_i - E_i)^2 / E_i)
+df = n - 1
+If expected frequencies equal:
+E = total observed / n
+Equivalent formula:
+chi^2 = sum(O_i^2 / E) - n
+25.9 Finance: Annuities and Compound Amounts
+--------------------------------------------
+Variables:
+- n: number of compounding periods
+- i: periodic interest rate as percentage
+- PV: present value
+- PMT: periodic payment
+- FV: future value
+Payment modes:
+- Ordinary annuity: payments at end of period.
+- Annuity due: payments at beginning of period.
+Mode selection in the manual program:
+- Press the program's annuity-mode routine, then R/S until 1 is displayed for
+  ordinary annuity.
+- Press R/S until 0 is displayed for annuity due.
+- Repeating this step toggles between the two modes.
+Sign convention:
+- Cash outlays negative.
+- Cash incomes positive.
+Core equation:
+0 = PV
++ PMT * A * (1 - (1 + i_decimal)^(-n)) / i_decimal
++ FV * (1 + i_decimal)^(-n)
+where:
+i_decimal = i / 100
+A = 1 for ordinary annuity
+A = (1 + i_decimal) for annuity due
+Errors:
+- i = 0 causes Error 0.
+- Extremely high or low n or i may give invalid results.
+Program-specific notes:
+- The program can also be used to compute accumulated interest and remaining
+  balance by solving for FV at intermediate periods.
+- Clearing registers or storing zero for variables no longer applicable is the
+  recommended way to change problem combinations without reinitializing all
+  data.
+25.10 Submarine Hunt
+--------------------
+Game behavior:
+- 10x10 grid.
+- Submarine positioned by random seed.
+- Sonar reading returns 1 if submarine in adjacent square or same square.
+- Depth charge returns blinking 1s for hit, 0 for miss.
+- Optional mode: submarine moves after each sonar echo and each miss.
+- Submarine moves randomly to adjacent square in same row or column.
+- Depth charge range 0.9 squares.
+Status format XX.YY:
+XX = depth charges fired
+YY = sonar readings
+Random integer generation:
+- Generate random r in [0,1).
+- Multiply by 10.
+- Take integer portion.
+- Gives integer 0..9.
+================================================================================
+26. IMPORTANT BEHAVIORAL TEST CASES
+================================================================================
+These manual examples are useful for validating an implementation.
+26.1 Heat loss program
+----------------------
+Formula:
+q = h * A * T
+Manual keystrokes:
+15 ENTER
+30
+*
+.47
+*
+Result:
+211.5000
+Program version:
+LBL A
+3
+0
+*
+.47
+*
+RTN
+Runs:
+15 f A -> 211.5000
+18 f A -> 253.8000
+26.2 Area of circle program
+---------------------------
+Formula:
+A = pi * r^2
+Program:
+LBL A
+x^2
+pi
+*
+RTN
+Tests:
+7.5  -> 176.7146
+9    -> 254.4690
+15.3 -> 735.4154
+26.3 Pythagorean theorem program
+--------------------------------
+Formula:
+c = sqrt(a^2 + b^2)
+Input:
+a in Y, b in X.
+Tests:
+22 ENTER 9  -> 23.7697
+17 ENTER 34 -> 38.0132
+26.4 Conditional loop square roots
+----------------------------------
+Program displays integers 1..10 and square roots.
+Uses:
+- R1 counter
+- PSE display
+- x> conditional
+- GTO loop
+26.5 Flag-controlled miles/kilometers conversion
+------------------------------------------------
+Conversion factor:
+1.6093
+Miles to km:
+- multiply by 1.6093
+Km to miles:
+- divide by 1.6093
+Flag 0 selects operation.
+================================================================================
+27. FIRMWARE-DERIVED IMPLEMENTATION NOTES
+================================================================================
+These notes are derived from disassembly and are useful for firmware-accurate
+implementations. Functional emulators MAY abstract them.
+27.1 Nut CPU register usage
+---------------------------
+The Nut CPU has 16 registers of 56 bits, 14 BCD nibbles each.
+HP-11C firmware uses:
+- Reg 0-5: statistics accumulators R0-R5
+- Reg 7: display/error state; error code storage
+- Reg 14: program counter PC
+- Reg 15: keycode latch / subroutine return address
+User-visible storage registers R0-R9, R.0-R.9, and I are RAM locations, not
+direct CPU registers.
+27.2 Status bits
+----------------
+Relevant firmware status bits:
+- Status 2: program mode
+- Status 7: f prefix pending
+- Status 8: g prefix pending
+- Status 11: User mode active
+- Status 12: Program mode active
+The RAD/GRAD annunciator is controlled by angular mode state, not by a
+dedicated status bit.
+The low-battery asterisk is hardware-controlled.
+27.3 Keyboard scan
+------------------
+The keyboard is scanned linearly over 40 key positions.
+A firmware dispatch table of 64 entries maps keycodes to handlers.
+Some functions have duplicate raw keycodes; accepting both is firmware-accurate.
+27.4 Program execution
+----------------------
+- PC is stored as a decimal line number.
+- PC increment is a BCD increment.
+- Label search starts at current PC and proceeds toward higher line numbers,
+wrapping at end of occupied memory.
+- Conditional tests skip one line by incrementing PC by 2 instead of 1.
+- Execution chunks of about 200 instructions allow key scanning and halt.
+================================================================================
+28. CONFORMANCE CHECKLIST
+================================================================================
+A complete reimplementation SHOULD verify:
+Basic calculator:
+[ ] Power on/off
+[ ] Auto-off
+[ ] Continuous Memory preservation
+[ ] Memory reset procedure and Pr Error
+[ ] Reset defaults: DEG, FIX 4, radix point, seed zero, flags clear
+[ ] Radix mark toggle uses decimal point key, keycode element 48
+[ ] Low-battery indicator state
+Display:
+[ ] FIX 0..9
+[ ] SCI 0..9 with 6-digit visible decimal maximum
+[ ] ENG 0..9 with exponent multiples of 3
+[ ] ENG n interpreted as additional significant digits
+[ ] SCI 8/9 aliased to SCI 7
+[ ] ENG 8/9 aliased to ENG 7
+[ ] f SCI 8/9 stored as 42 8 7
+[ ] f ENG 8/9 stored as 42 9 7
+[ ] Automatic FIX/SCI switching
+[ ] FIX fallback thresholds treated as implementation-defined unless display-accurate
+[ ] SCI 7/8/9 internal rounding and possible trailing-9 propagation
+[ ] f CLEAR PREFIX held shows full mantissa
+[ ] Mantissa display not canceled by other key presses
+[ ] Annunciators
+[ ] Error display centered as Error x
+[ ] Error display is "Error" + blank + digit, 7 glyphs centred d2..d8
+[ ] Pr Error centered columns d2..d9
+[ ] Annunciator row always visible, also during error display
+[ ] Documented annunciator set: * USER f g GRAD/RAD PRGM
+[ ] BEGIN/D.MY/C optional and never lit
+[ ] RAD renders as GRAD legend with G unlit
+[ ] Running indication during program execution
+[ ] Running indication during P_y,x/C_y,x
+[ ] Light-all-segments checkbox present in same UI row as radix checkbox
+Radix and separators:
+[ ] Decimal point radix uses comma thousands separator
+[ ] Decimal comma radix uses point thousands separator
+[ ] Program-mode three-key separators use digit separator glyph
+[ ] Decimal point radix -> program separators commas
+[ ] Decimal comma radix -> program separators dots
+Keyboard / prefix / digit entry:
+[ ] f annunciator disappears after next non-prefix key
+[ ] g annunciator disappears after next non-prefix key
+[ ] f/g prefix is consumed by next non-prefix key
+[ ] CLEAR PREFIX cancels pending prefixes
+[ ] CLEAR PREFIX cancels STO/RCL/GTO/GSB/HYP/HYP-inverse
+[ ] Backarrow deletes rightmost mantissa character
+[ ] Mantissa sign is never deleted on its own
+[ ] Fully erased entry shows standard display of 0, entry active
+[ ] Backarrow deletes last exponent digit first
+[ ] Exponent sign deleted only when no exponent digits remain
+[ ] After sign removal exponent shows 00
+[ ] One more backarrow removes EEX
+[ ] Repeated CHS presses are not undone one by one
+[ ] Backarrow does not terminate digit entry
+[ ] Backarrow outside digit entry acts like CLx
+[ ] Backarrow outside digit entry disables stack lift
+Stack:
+[ ] ENTER behavior
+[ ] Stack lift enable/disable/neutral
+[ ] Stack drop on two-number functions
+[ ] x<>y
+[ ] R down
+[ ] R up
+[ ] LAST X save/recall
+[ ] LAST X saved for 10^x
+[ ] Constant arithmetic using T register
+Math:
+[ ] +, -, *, /
+[ ] y^x
+[ ] 1/x
+[ ] sqrt
+[ ] x^2
+[ ] factorial/Gamma
+[ ] x! negative argument returns -9.999999999e99
+[ ] x! large positive integer >=70 returns +9.999999999e99
+[ ] x! positive non-integer returns Gamma(x+1)
+[ ] ABS, INT, FRAC, RND
+[ ] LN, LOG, e^x, 10^x
+[ ] Pi
+Trig:
+[ ] DEG/RAD/GRAD modes
+[ ] Mode keys g DEG, g RAD, g GRAD
+[ ] sin/cos/tan
+[ ] inverse trig
+[ ] arcsin/arccos domain |x| > 1
+[ ] hyperbolic and inverse hyperbolic
+[ ] acosh error x < 1
+[ ] atanh error |x| > 1
+[ ] atanh no error at +1
+[ ] atanh no error at -1
+[ ] degree/radian conversions
+[ ] H.MS conversions
+[ ] H.MS internal format H + MM/100 + SS.s/10000
+Percent:
+[ ] %
+[ ] Delta%
+[ ] g % keycode 43 14
+[ ] g Delta% keycode 43 15
+Coordinates:
+[ ] ->P
+[ ] ->R
+Probability:
+[ ] P_y,x
+[ ] C_y,x
+[ ] input validation
+[ ] max input 10^10 - 1
+[ ] running indicator during long calculations
+[ ] running indicator during program execution
+Random:
+[ ] f RAN# advances generator state
+[ ] Repeated f RAN# produces different numbers
+[ ] RAN# inside program advances generator state
+[ ] LCG: S = (16807*S) mod 2147483647
+[ ] result = S / 2147483647
+[ ] seed storage
+[ ] seed normalization
+[ ] same seed reproduces same sequence
+[ ] seed 0 treated as 1 on first activation
+[ ] reset seed to zero
+Statistics:
+[ ] Sigma plus
+[ ] Sigma minus
+[ ] CLEAR Sigma
+[ ] mean
+[ ] sample standard deviation
+[ ] linear regression
+[ ] f L.R. returns intercept in X and slope in Y
+[ ] y,r and correlation coefficient
+[ ] y,r Error 2 conditions
+[ ] x-estimation manual via (y-B)/A
+[ ] statistical error conditions
+[ ] Error 3 if R0..R5 converted to program memory
+[ ] Sigma+/Sigma- do not produce Error 1 on accumulator overflow
+[ ] RCL Sigma+ recalls R1 into X and R3 into Y
+[ ] RCL Sigma+ stack behavior
+[ ] RCL Sigma+ does not update LAST X
+[ ] RCL Sigma+ keycode 45 49
+[ ] RCL Sigma+ programmable
+Storage:
+[ ] STO/RCL 0..9
+[ ] STO/RCL .0.. .9
+[ ] STO/RCL I
+[ ] storage arithmetic
+[ ] indirect storage arithmetic 0..19
+[ ] indirect address 20 addresses I for store/recall/exchange AND arithmetic
+[ ] STO +/-/*// (i) with address 20 operates on I (no Error 0)
+[ ] CLEAR REG clears I
+[ ] STO / n with X=0 produces Error 0
+[ ] storage overflow Error 1
+[ ] converted register access Error 3
+Programming:
+[ ] Program/Run mode toggle with g P/R
+[ ] PRGM annunciator
+[ ] Entering Program mode does not blank display
+[ ] P/R preserves PC in both directions
+[ ] line numbers
+[ ] line 000 marker
+[ ] line 001 first instruction
+[ ] keycodes
+[ ] insert instructions
+[ ] delete instructions
+[ ] SST/BST update program line display
+[ ] Program-mode held SST: immediate first step, 1 s initial delay, then 2 steps/s
+[ ] Program-mode held BST: immediate first step, 1 s initial delay, then 2 steps/s
+[ ] Run-mode SST displays line at PC, or line 001 if PC=000
+[ ] Run-mode SST executes displayed line on release
+[ ] Run-mode BST moves backward without executing
+[ ] Run-mode BST wraps from 000 to last occupied line
+[ ] Program-mode SST/BST wrap through 000
+[ ] GTO .nnn direct line positioning moves PC without execution
+[ ] GTO .000 always valid
+[ ] GTO .nnn to unoccupied line produces Error 4
+[ ] GTO followed by A-E or 0-9 is a label operation
+[ ] GSB followed by A-E or 0-9 is a label operation
+[ ] Programmable line branching uses negative I with GTO I or GSB I (22 25 / 32 25)
+[ ] labels A-E and 0-9
+[ ] duplicate labels allowed
+[ ] label search and wrap
+[ ] RTN
+[ ] R/S stop/resume
+[ ] R/S from PC=000 starts at line 001 if program exists
+[ ] R/S instruction at last occupied line wraps PC to 000
+[ ] Normal execution past last occupied line wraps PC to 000 without Error 4
+[ ] PSE pause
+[ ] end-of-memory behavior
+[ ] maximum 203 lines
+[ ] Error 4 for bad line/label
+[ ] Error 5 for subroutine depth
+[ ] f A-E in Program mode inserts GSB label
+[ ] f LBL label in Program mode inserts LBL label
+Program display:
+[ ] Program display uses LLL-iiiiii format
+[ ] One-key instructions are right-aligned
+[ ] Two-key instructions use one blank separator and are right-aligned
+[ ] Three-key instructions use radix-complement separators
+[ ] Single-digit keycodes are displayed without filler zero
+[ ] Program-mode hyphen in d4 is segment g, not minus glyph
+[ ] Program mode minus column reserved and unlit
+Memory allocation:
+[ ] initial 63 lines and 20 normal registers plus I
+[ ] automatic conversion in correct order
+[ ] reverse conversion on deletion
+[ ] deleting below a 7-line block boundary releases the whole block
+[ ] f CLEAR PRGM in Program mode restores initial allocation
+[ ] f CLEAR PRGM in Run mode sets PC=000 without clearing program memory
+[ ] g MEM held display
+[ ] MEM p-xx  r- .x physical layout, momentary while held
+[ ] MEM r-? when no registers remain convertible
+Control:
+[ ] all conditional tests
+[ ] conditional keycodes:
+f x<=y 42 10
+f x>y  42 20
+f x<>y 42 30
+f x=y  42 40
+g x<0  43 10
+g x>0  43 20
+g x<>0 43 30
+g x=0  43 40
+[ ] true/false skip behavior
+[ ] conditional tests stack-neutral and no LAST X
+[ ] flags SF/CF/F?
+[ ] flag persistence
+[ ] Error 6 for flag number > 1
+[ ] GTO branches
+[ ] loops
+Index register:
+[ ] STO I/RCL I/x<>I
+[ ] ISG
+[ ] DSE
+[ ] control number parsing
+[ ] skip behavior
+[ ] indirect STO/RCL
+[ ] indirect storage arithmetic
+[ ] indirect GTO/GSB label
+[ ] indirect GTO/GSB line number
+[ ] negative indirect line addressing
+[ ] indirect line target 000 invalid
+[ ] indirect label addresses 15..19 produce Error 4
+[ ] ISG/DSE rounding edge cases
+User mode:
+[ ] USER annunciator
+[ ] A-E direct execution
+[ ] exact top-row exchanges: sqrt->A, e^x->B, 10^x->C, y^x->D, 1/x->E
+[ ] f + top-row key performs original math function in User mode
+[ ] toggle off with f USER
+Errors:
+[ ] Error 0 conditions
+[ ] Error 1 conditions
+[ ] Error 2 conditions
+[ ] Error 3 conditions
+[ ] Error 4 conditions
+[ ] Error 5 conditions
+[ ] Error 6 conditions
+[ ] Error 9/service
+[ ] Pr Error
+[ ] Error halt leaves PC at offending line
+[ ] Any key clears error but does not resume program
+Firmware-derived optional conformance:
+[ ] PC represented as register 14
+[ ] Return stack represented as register 15
+[ ] Error state represented as register 7
+[ ] Status bits for f/g/USER/PRGM
+[ ] Duplicate raw firmware keycodes accepted
+[ ] Conditional false skip implemented as PC+2
+[ ] Execution interruptible in chunks
+Application test programs:
+[ ] Heat loss
+[ ] Circle area
+[ ] Pythagorean theorem
+[ ] Matrix algebra
+[ ] Linear equations
+[ ] Newton's method
+[ ] Numerical integration
+[ ] Curve fitting
+[ ] Triangle solutions
+[ ] t statistics
+[ ] Chi-square
+[ ] Finance
+[ ] Submarine Hunt
+================================================================================
+29. DELIBERATELY OUT OF SCOPE (NOT IMPLEMENTED)
+================================================================================
+The following behaviors are intentionally not reproduced. They are either
+hardware-service functions or explicitly optional in this specification; they
+are not required for functional conformance and are excluded from the
+differential test suite.
+
+29.1 Hardware service and self-test
+-----------------------------------
+- Power-on self-tests (ON+x, ON+plus, ON+minus), the service display test, the
+  Error 9 service condition, and the keyboard test that ends with 11.
+- Low-battery sensing and the flashing '*' annunciator.  The GUI exposes a
+  manual low-battery display checkbox for visual inspection only; it does not
+  measure a battery.  (The '*' glyph itself is rendered from that control.)
+- Automatic power-off (8-17 minutes) and sleep/wake behavior.
+- The physical keyboard scan matrix, debounce, rollover, and key-scan timing;
+  keys are delivered to the model as logical press/release events.
+- Display refresh/multiplexing timing, blink timing, and segment ghosting.
+- Continuous Memory persistence through real power loss or physical trauma.
+  A GUI may persist its own state, but the reference ROM model is started
+  fresh for each test and reports Pr Error from undefined RAM.
+- Exact cycle timings, instruction burst sizes, and interruptibility.
+
+29.2 Optional / non-normative
+-----------------------------
+- Exact LCD glass etching beyond the reference geometry in 7.10.  The
+  sister-model legends BEGIN, D.MY and C are never lit on the HP-11C.
+- Peripherals (printer, card reader, HP-IL): not part of the HP-11C.
+- Bit-exact random-number sequence.  The LCG in 14.2 is a permitted
+  substitute; the original ROM uses a different generator.
+- The radix-toggle hardware key-hold procedure (holding the decimal point at
+  power-on).  The radix conventions themselves ARE implemented and selectable
+  in the GUI, and are covered by the differential suite (13 cases, marks
+  compared against the ROM convention).
+
+29.3 GUI-only extensions (not part of the ROM)
+----------------------------------------------
+- The numeric inspector panel, light-all-segments checkbox, host keyboard
+  bindings, and Continuous Memory via localStorage are emulator conveniences
+  and have no ROM equivalent.
+
+================================================================================
+30. CHANGELOG
+================================================================================
+2026-08-03:
+- Added RCL Sigma+ special statistics recall: recalls R1 to X and R3 to Y,
+  does not update LAST X, is programmable, uses keycode 45 49, and produces
+  Error 3 if statistics registers are converted.
+- Added Program-mode f CLEAR PRGM behavior in Run mode: sets PC=000 only and
+  does not clear program memory or allocation.
+- Separated programmable clear instructions from non-programmable/context-
+  dependent clear keycodes. CLR Sigma and CLR REG are programmable; CLR PRGM
+  and CLR PREFIX are not normally stored.
+- Updated annunciator requirements: documented HP-11C annunciators are
+  * USER f g GRAD/RAD PRGM. BEGIN/D.MY/C are optional sister-model legends and
+  never lit.
+- Added running indication during program execution and during P_y,x/C_y,x.
+- Added explicit Error 2 conditions for y,r.
+- Added explicit statement that Sigma+ and Sigma- do not produce Error 1 on
+  accumulator overflow.
+- Added x-bar, s, L.R., and RCL Sigma+ to LAST X exceptions.
+- Updated Program-mode held SST/BST timing per actual-device verification:
+  immediate first step, 1 second initial delay, then 2 steps per second.
+- Confirmed radix/digit-separator toggle key is the decimal point key,
+  keycode element 48.
+- Added percent keycodes: g % = 43 14, g Delta% = 43 15.
+- Added random-number seed reproducibility: same seed produces same sequence.
+- Added optional self-test details from the owner's manual.
+- Added note that exact FIX fallback thresholds are implementation-defined for
+  functional conformance.
+- Added statistics precision normalization note for closely spaced data.
+- Added reverse memory conversion example for deleting below a 7-line block
+  boundary.
+- Added application-program details relevant to integration tests, including
+  Newton defaults, finance annuity-mode toggling, curve-fitting r^2 output and
+  register clearing, and triangle SSA second-solution indication.
+- Added correlation coefficient range interpretation.
+- Added SCI 7/8/9 internal rounding/trailing-9 propagation note.
+- Corrected §7.10 LCD geometry to match the calibrated implementation and the
+  locked reference image: baselineY 0.16 -> 0.17, gapFrac 0.42 -> 0.44.
+  Added provenance note and conflict rule: §7.10 geometry is photo-calibrated
+  to HP11c_image.png and is normative; spec is updated before code when the
+  reference image changes.
+
+2026-10-17 (ROM differential audit against 11c.obj on Nonpareil):
+- Corrected default display mode: FIX 4, not FIX 2 (§4.7, §28).
+- Corrected error layout: "Error" + blank + digit, 7 glyphs centred d2..d8
+  (§7.9, §28).
+- Storage arithmetic to I via indirect address 20 is valid and operates on I
+  for +, -, *, /; removed the Error 0 rule (§4.3, §16.4, §21.6, §23.1, §28).
+- Indirect branches/subroutines use the I key (f TAN, keycode 25), stored as
+  GTO I = 22 25 and GSB I = 32 25; (i) remains for indirect storage (§6.3,
+  §18.3, §21.7, §28).
+- Indirect label addresses 15..19 produce Error 4; removed the silent no-op
+  exception (§17.6, §21.7, §23.5, §28).
+- Documented that the radix mark is always displayed, including at 0 fraction
+  digits, and that FIX 0 falls back to SCI when the value rounds to zero
+  (§7.2-7.4).
+- Documented thousands-separator grouping during digit and EEX entry (§5.2,
+  §5.4).
+- Documented the physical MEM glass layout and reiterated that MEM is
+  momentary while held (§4.6).
+- Noted that the ROM's actual RAN# sequence differs from the specified LCG;
+  the LCG remains a permitted substitute (§14.2).
+- Fixed the GUI low-battery annunciator: the '*' glyph was rendered as a
+  blank; the checkbox now lights the asterisk (display test only).
+- Added differential coverage for memory allocation/Error 3 (64-line
+  conversion, reverse conversion on delete, CLEAR PRGM in both modes, 203-line
+  limit), all 36 programmable keys x plain/f/g recording (107 cases), and the
+  radix-comma convention (13 cases).
+- Added STO RAN# seed self-consistency checks (normalization and repeatability)
+  for both the ROM and the JS engine.
+- Added 29 "Deliberately out of scope" (hardware service/self-test, low-battery
+  sensing, auto-off, physical key scan, display timing, Continuous Memory
+  persistence, peripherals, RNG exactness, GUI-only extensions).
+- ROM execution coverage of the differential suite: 5287/6144 words (86.1%);
+  the remaining unhit spans are the hardware service/self-test paths and a few
+  rare math/statistics branches.

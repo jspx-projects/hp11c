@@ -1,0 +1,68 @@
+diff --git a/src/proc.c b/src/proc.c
+index e3cb7a2..23ace34 100644
+--- a/src/proc.c
++++ b/src/proc.c
+@@ -49,7 +49,10 @@ MA 02111, USA.
+ 
+ 
+ // We try to schedule execution in "jiffies".
+-#define JIFFY_PER_SEC 30
++/* Local verification build: wake the sim thread more often so that a
++ * NONPAREIL_TURBO multiplier can run many more cycles per unit of wall time
++ * (see sim_init).  At turbo=1 this still yields real-time execution. */
++#define JIFFY_PER_SEC 1000
+ 
+ #define JIFFY_USEC (1.0e6 / JIFFY_PER_SEC)
+ 
+@@ -1138,6 +1141,18 @@ sim_t *sim_init  (char *ncd_fn,
+ 
+   arch_info = get_arch_info (sim->arch);
+   sim->words_per_usec = calcdef_get_clock_frequency (sim->calcdef) / (1.0e6 * arch_info->word_length);
++  {
++    /* Local verification build: NONPAREIL_TURBO=N runs N times faster than
++     * real time.  Firmware timing is cycle-based, so results are unchanged;
++     * only the wall-clock rate differs. */
++    const char *turbo = getenv("NONPAREIL_TURBO");
++    if (turbo && *turbo)
++      {
++        double factor = strtod(turbo, NULL);
++        if (factor > 0 && factor < 1e6)
++          sim->words_per_usec *= factor;
++      }
++  }
+ 
+   sim->proc->new_processor (sim);
+ 
+diff --git a/src/proc_nut.c b/src/proc_nut.c
+index b7f8e6d..777ab48 100644
+--- a/src/proc_nut.c
++++ b/src/proc_nut.c
+@@ -41,6 +41,18 @@ see <https://www.gnu.org/licenses/>.
+ #include "proc_nut.h"
+ #include "sound.h"
+ 
++/* Local verification build: ROM execution coverage bitmap. */
++unsigned char nut_cov[0x1800];
++
++void nut_dump_coverage(const char *path)
++{
++  FILE *f = fopen (path, "wb");
++  if (! f)
++    return;
++  fwrite (nut_cov, 1, sizeof (nut_cov), f);
++  fclose (f);
++}
++
+ 
+ #undef WARNING_G
+ 
+@@ -1924,6 +1936,9 @@ static bool nut_execute_cycle (sim_t *sim)
+   else
+     nut_reg->prev_pc = nut_reg->pc;
+ 
++  if (nut_reg->prev_pc < 0x1800)
++    nut_cov[nut_reg->prev_pc] = 1;
++
+   opcode = nut_get_ucode (nut_reg, nut_reg->prev_pc);
+ 
+ #ifdef HAS_DEBUGGER
